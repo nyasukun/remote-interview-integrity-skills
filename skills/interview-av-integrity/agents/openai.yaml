@@ -1,0 +1,4 @@
+interface:
+  display_name: "面談A/V整合性分析"
+  short_description: "破裂音と口唇運動を監査し、検証可能な比較動画を作成"
+  default_prompt: "$interview-av-integrity を使って、この面談録画のA/V整合性を分析し、監査可能な比較動画まで作成してください。"

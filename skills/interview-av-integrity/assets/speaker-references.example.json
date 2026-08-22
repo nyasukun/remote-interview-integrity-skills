@@ -1,0 +1,17 @@
+{
+  "candidate": {
+    "display_name": "Candidate Display Name",
+    "time_s": 120.0,
+    "group": "candidate"
+  },
+  "interviewer_a": {
+    "display_name": "Interviewer A",
+    "time_s": 60.0,
+    "group": "control"
+  },
+  "interviewer_b": {
+    "display_name": "Interviewer B",
+    "time_s": 300.0,
+    "group": "control"
+  }
+}

@@ -1,0 +1,5 @@
+av==17.0.1
+mediapipe==1.0.0
+numpy>=2,<3
+Pillow>=10,<13
+matplotlib>=3.8,<4

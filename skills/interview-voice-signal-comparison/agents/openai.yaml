@@ -1,0 +1,5 @@
+interface:
+  display_name: "面談音声信号比較"
+  short_description: "指定音声を基準に複数話者の音響特徴を比較して動画化"
+  brand_color: "#D55E00"
+  default_prompt: "Use $interview-voice-signal-comparison to compare a designated interview-audio segment with neutral reference groups and create a QA-verified descriptive video."

@@ -1,0 +1,3 @@
+event_id,source_release_s,classification,label,note,mouth_roi,include,exclusion_reason
+case-001,123.456,closure_absent,対象語,可視フレーム内で明瞭な接触なし,"0.38,0.50,0.62,0.78",true,
+case-002,234.567,contact_reference,閉鎖あり参照,高品質な可視フレームで両唇接触を確認,"0.38,0.50,0.62,0.78",true,

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source_video": "/absolute/path/to/interview.mp4",
+  "title": "破裂音と口唇閉鎖の比較",
+  "subtitle": "観測資料 — 原因判定ではありません",
+  "phone_label": "/p/",
+  "mouth_roi": [0.38, 0.5, 0.62, 0.78],
+  "events": [
+    {
+      "event_id": "case-001",
+      "source_release_s": 123.456,
+      "classification": "closure_absent",
+      "label": "対象語",
+      "note": "可視フレーム内で明瞭な接触なし",
+      "mouth_roi": [0.38, 0.5, 0.62, 0.78]
+    },
+    {
+      "event_id": "case-002",
+      "source_release_s": 234.567,
+      "classification": "contact_reference",
+      "label": "閉鎖あり参照",
+      "note": "高品質な可視フレームで両唇接触を確認",
+      "mouth_roi": [0.38, 0.5, 0.62, 0.78]
+    }
+  ]
+}
