@@ -18,6 +18,13 @@ sys.path.insert(0, str(ROOT.parents[1]))
 
 from acoustics.extract_acoustic_features import extract  # noqa: E402
 from common import ManifestError, load_manifest, sha256  # noqa: E402
+from layout_reference import (  # noqa: E402
+    LayoutReferenceError,
+    REQUIRED_QUALITY_CHECKS,
+    preview_provenance_path,
+    review_sheet_path,
+    verify_layout_reference,
+)
 from render import render  # noqa: E402
 from verify import VerificationError, _contact_sheet_targets, verify  # noqa: E402
 from render_layout_preview import render_preview  # noqa: E402
@@ -106,10 +113,39 @@ def write_render_manifest(root: Path, provenance: Path) -> Path:
     }
     manifest = root / "manifest.json"
     manifest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    preview = render_preview(manifest, root / "approved_layout_preview.png")
+    preview_provenance = preview_provenance_path(preview)
+    payload["layout_review"] = {
+        "status": "APPROVED",
+        "approval_basis": "explicit user approval recorded by synthetic regression fixture",
+        "preview": {"path": preview.name, "sha256": sha256(preview)},
+        "preview_provenance": {
+            "path": preview_provenance.name,
+            "sha256": sha256(preview_provenance),
+        },
+        "review_sheet": {
+            "path": review_sheet_path(preview).name,
+            "sha256": sha256(review_sheet_path(preview)),
+        },
+        "quality_checks": {name: True for name in REQUIRED_QUALITY_CHECKS},
+    }
+    manifest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return manifest
 
 
 class RenderingSmokeTests(unittest.TestCase):
+    def test_canonical_layout_reference_integrity_and_dimensions(self) -> None:
+        reference = verify_layout_reference()
+        self.assertEqual(
+            reference["asset"]["sha256"],
+            "6d85aebbdefa38d886f8f78326e4ebb94b1aa66af797a9a0a4ac03c45311039a",
+        )
+        self.assertEqual(
+            (reference["asset"]["width"], reference["asset"]["height"]),
+            (1672, 941),
+        )
+        self.assertEqual(reference["production_canvas"], {"width": 1920, "height": 1080})
+
     def test_contact_sheet_targets_stay_inside_short_intro_and_outro(self) -> None:
         clips = [
             {
@@ -133,10 +169,73 @@ class RenderingSmokeTests(unittest.TestCase):
             manifest = write_render_manifest(root, provenance)
             preview = render_preview(manifest, root / "preview.png")
             self.assertTrue(preview.is_file())
+            preview_provenance = preview_provenance_path(preview)
+            review_sheet = review_sheet_path(preview)
+            self.assertTrue(preview_provenance.is_file())
+            self.assertTrue(review_sheet.is_file())
+            provenance_payload = json.loads(preview_provenance.read_text(encoding="utf-8"))
+            self.assertEqual(provenance_payload["preview"]["sha256"], sha256(preview))
+            self.assertEqual(
+                provenance_payload["reference"]["asset"]["sha256"],
+                verify_layout_reference()["asset"]["sha256"],
+            )
+            self.assertEqual(
+                provenance_payload["quality_contract"]["structure_source"],
+                "production _clip_frame path with synthetic waveform/Log-Mel placeholders",
+            )
+            self.assertEqual(provenance_payload["review_sheet"]["sha256"], sha256(review_sheet))
             from PIL import Image
 
             with Image.open(preview) as image:
                 self.assertEqual(image.size, (1920, 1080))
+            with Image.open(review_sheet) as image:
+                self.assertEqual(image.size, (1920, 720))
+
+    def test_production_render_rejects_missing_or_incomplete_layout_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_audio(root / "fixture.wav")
+            provenance = root / "selection.json"
+            provenance.write_text("{}\n", encoding="utf-8")
+            manifest = write_render_manifest(root, provenance)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            del payload["layout_review"]
+            missing = root / "missing_review.json"
+            missing.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(LayoutReferenceError, "layout_review is required"):
+                render(
+                    missing,
+                    root / "missing.mp4",
+                    root / "missing-effective.json",
+                    root / "missing-frames.csv",
+                    root / "missing-audio.csv",
+                )
+
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["layout_review"]["quality_checks"]["range_and_median_visible"] = False
+            incomplete = root / "incomplete_review.json"
+            incomplete.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(LayoutReferenceError, "layout review is incomplete"):
+                render(
+                    incomplete,
+                    root / "incomplete.mp4",
+                    root / "incomplete-effective.json",
+                    root / "incomplete-frames.csv",
+                    root / "incomplete-audio.csv",
+                )
+
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            del payload["layout_review"]["review_sheet"]
+            missing_sheet = root / "missing_sheet_review.json"
+            missing_sheet.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(LayoutReferenceError, "side-by-side review sheet"):
+                render(
+                    missing_sheet,
+                    root / "missing-sheet.mp4",
+                    root / "missing-sheet-effective.json",
+                    root / "missing-sheet-frames.csv",
+                    root / "missing-sheet-audio.csv",
+                )
 
     def test_loader_accepts_one_through_three_caller_labeled_comparison_groups(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -215,6 +314,18 @@ class RenderingSmokeTests(unittest.TestCase):
             self.assertEqual(payload["clip_manifest"]["sha256"], sha256(root / "clip_manifest.json"))
             self.assertEqual(payload["output"]["frame_map_sha256"], sha256(frames))
             self.assertEqual(payload["output"]["audio_map_sha256"], sha256(audio))
+            self.assertEqual(
+                payload["layout"]["reference_asset"]["asset"]["sha256"],
+                verify_layout_reference()["asset"]["sha256"],
+            )
+            self.assertEqual(
+                payload["layout"]["approved_preview"]["preview"]["sha256"],
+                sha256(root / "approved_layout_preview.png"),
+            )
+            self.assertEqual(
+                payload["layout"]["approved_preview"]["review_sheet"]["sha256"],
+                sha256(root / "approved_layout_preview.review-sheet.png"),
+            )
             self.assertLess(effective.stat().st_size, 262_144)
             for metric in payload["summary"]["metrics"].values():
                 self.assertEqual(metric["signed_deltas_to_designated"]["focus_anchor"], {"min": 0.0, "max": 0.0, "median": 0.0})

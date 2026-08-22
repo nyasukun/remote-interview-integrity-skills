@@ -43,6 +43,7 @@ from common import (
     sha256,
     waveform_bins,
 )
+from layout_reference import verify_approved_preview, verify_layout_reference
 TOOLKIT_DIR = RENDERING_DIR.parent
 if str(TOOLKIT_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLKIT_DIR))
@@ -155,13 +156,15 @@ def _panel(image: Image.Image, data: ClipData, group: GroupSpec, bounds: tuple[i
     draw.text((left + 26, top + 22), group.label, font=font(30, True), fill=group.color_rgb)
     draw.text((left + 28, top + 68), data.spec.label, font=font(18), fill=TEXT)
     draw.text((left + 28, top + 98), f"language  {data.spec.language}", font=font(16), fill=MUTED)
-    draw.text((right - 150, top + 28), "playing" if active else "reference", font=font(17, True), fill=group.color_rgb if active else MUTED)
+    draw.text((left + 28, top + 126), f"duration  {data.spec.duration_s:.2f}s", font=font(15), fill=MUTED)
+    state = "playing" if active else ("fixed anchor" if group.role == "designated_anchor" else "reference")
+    draw.text((right - 176, top + 28), state, font=font(17, True), fill=group.color_rgb if active or group.role == "designated_anchor" else MUTED)
     _waveform(draw, (left + 82, top + 150, right - 18, top + 273), data.waveform, group.color_rgb, progress if active else None)
-    draw.text((left + 24, top + 164), "wave", font=font(16, True), fill=MUTED)
+    draw.text((left + 18, top + 164), "waveform", font=font(14, True), fill=MUTED)
     spectrum_box = (left + 82, top + 320, right - 18, bottom - 20)
     image.paste(data.spectrogram.resize((spectrum_box[2] - spectrum_box[0], spectrum_box[3] - spectrum_box[1])), spectrum_box[:2])
     draw.rectangle(spectrum_box, outline=GRID)
-    draw.text((left + 18, top + 338), "STFT", font=font(15, True), fill=MUTED)
+    draw.text((left + 16, top + 338), "Log-Mel", font=font(14, True), fill=MUTED)
     if active and progress is not None:
         x = spectrum_box[0] + int(progress * (spectrum_box[2] - spectrum_box[0]))
         draw.line((x, spectrum_box[1], x, spectrum_box[3]), fill=group.color_rgb, width=3)
@@ -174,17 +177,17 @@ def _delta_chart(image: Image.Image, bounds: tuple[int, int, int, int], title: s
     draw.text((left + 16, top + 11), title, font=font(18, True), fill=TEXT)
     designated = next(group for group in spec.groups if group.group_id == spec.anchor_group)
     comparison = list(spec.comparison_groups)
-    draw.text((left + 18, top + 39), "designated = 0", font=font(10, True), fill=designated.color_rgb)
+    draw.text((left + 18, top + 39), "designated = 0", font=font(12, True), fill=designated.color_rgb)
     legend_x = left + 115
     for group in comparison:
         draw.ellipse((legend_x, top + 43, legend_x + 7, top + 50), fill=group.color_rgb)
-        draw.text((legend_x + 10, top + 39), group.short_label, font=font(9, True), fill=group.color_rgb)
+        draw.text((legend_x + 10, top + 39), group.short_label, font=font(11, True), fill=group.color_rgb)
         legend_x += max(62, len(group.short_label) * 10 + 24)
     width = (right - left - 24) / len(columns)
     for column, (label, key, magnitude, fmt) in enumerate(columns):
         x0 = int(left + 16 + column * width)
         x1 = int(left + 8 + (column + 1) * width)
-        draw.text(((x0 + x1) / 2, top + 66), label, anchor="ma", font=font(11, True), fill=TEXT)
+        draw.text(((x0 + x1) / 2, top + 66), label, anchor="ma", font=font(12, True), fill=TEXT)
         zero = (x0 + x1) // 2
         draw.line((zero, top + 83, zero, top + 181), fill=designated.color_rgb, width=3)
 
@@ -200,10 +203,10 @@ def _delta_chart(image: Image.Image, bounds: tuple[int, int, int, int], title: s
             low, high, median = coordinate(row["min"]), coordinate(row["max"]), coordinate(row["median"])
             draw.line((low, y, high, y), fill=group.color_rgb, width=7)
             draw.ellipse((median - 5, y - 5, median + 5, y + 5), fill=group.color_rgb, outline=TEXT)
-        draw.text((x0, top + 191), format(-magnitude, fmt), font=font(8), fill=MUTED)
-        draw.text((zero, top + 191), "0", anchor="ma", font=font(8, True), fill=designated.color_rgb)
-        draw.text((x1, top + 191), format(magnitude, fmt), anchor="ra", font=font(8), fill=MUTED)
-    draw.text((left + 16, bottom - 23), note, font=font(9), fill=MUTED)
+        draw.text((x0, top + 191), format(-magnitude, fmt), font=font(10), fill=MUTED)
+        draw.text((zero, top + 191), "0", anchor="ma", font=font(10, True), fill=designated.color_rgb)
+        draw.text((x1, top + 191), format(magnitude, fmt), anchor="ra", font=font(10), fill=MUTED)
+    draw.text((left + 16, bottom - 23), note, font=font(11), fill=MUTED)
 
 
 def _clip_frame(spec: RenderSpec, clips: list[ClipData], summary: dict[str, Any], sample: int) -> Image.Image:
@@ -243,7 +246,7 @@ def _card(spec: RenderSpec, outro: bool) -> Image.Image:
         draw.text((134, 608), "Language, content, emotion, microphone, processing, and codec are confounds.", font=font(24), fill=MUTED)
         draw.text((134, 670), "Offsets are per-metric only—not composite similarity, distance, rank, or a winner.", font=font(23), fill=MUTED)
     else:
-        draw.text((134, 545), "waveform / STFT / F0 / periodicity / activity / voicing / RMS / band fractions", font=font(25), fill=MUTED)
+        draw.text((134, 545), "waveform / Log-Mel / F0 / periodicity / activity / voicing / RMS / band fractions", font=font(25), fill=MUTED)
         draw.text((134, 608), "Original clip audio plays sequentially without per-clip loudness normalization.", font=font(23), fill=MUTED)
     draw_limitation_strip(image, spec.limitation_text)
     return image
@@ -332,7 +335,9 @@ def _timeline(spec: RenderSpec, clips: list[ClipData]) -> tuple[np.ndarray, list
 
 
 def render(manifest: Path, output: Path, effective: Path, frame_map: Path, audio_map: Path) -> dict[str, Any]:
+    layout_reference = verify_layout_reference()
     spec = load_manifest(manifest)
+    layout_review = verify_approved_preview(spec.source_manifest, layout_reference)
     groups = {group.group_id: group for group in spec.groups}
     acoustic_manifest_path = Path(spec.acoustic_artifacts["artifact_manifest"]["path"])
     acoustic_features_path = Path(spec.acoustic_artifacts["acoustic_features"]["path"])
@@ -428,7 +433,7 @@ def render(manifest: Path, output: Path, effective: Path, frame_map: Path, audio
         "source_manifest_sha256": sha256(spec.source_manifest),
         "clip_manifest": {"path": str(spec.clip_manifest), "sha256": spec.clip_manifest_sha256},
         "provenance_manifests": list(spec.provenance),
-        "layout": {"width": WIDTH, "height": HEIGHT, "fps": FPS, "pixel_format": "yuv420p", "mode": "designated_point_centered"},
+        "layout": {"width": WIDTH, "height": HEIGHT, "fps": FPS, "pixel_format": "yuv420p", "mode": "designated_point_centered", "reference_asset": layout_reference, "approved_preview": layout_review},
         "comparison": {"anchor_group": spec.anchor_group, "display_anchor_group": spec.anchor_group, "point_group": spec.anchor_group, "reference_groups": [group.group_id for group in spec.comparison_groups], "delta_definition": "group metric minus user-designated point metric", "shared_metric_scales": True},
         "groups": [{"group_id": group.group_id, "role": group.role, "label": group.label, "short_label": group.short_label, "color_rgb": list(group.color_rgb), "clip_count": sum(clip.spec.group_id == group.group_id for clip in clips)} for group in spec.groups],
         "audio": {"sample_rate": AUDIO_RATE, "channels": 2, "edge_fade_ms": spec.edge_fade_ms, "source_timeline_peak": source_peak, "applied_global_gain": gain, "sample_count": timeline.shape[1], "policy": "sequential source audio; no per-clip loudness normalization"},

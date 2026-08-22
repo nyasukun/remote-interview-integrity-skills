@@ -95,9 +95,43 @@ full pipelineでは、特徴抽出用のclip manifestと動画用render manifest
     "height": 1080,
     "fps": 24,
     "audio_rate": 48000
+  },
+  "layout_review": {
+    "status": "APPROVED",
+    "approval_basis": "user explicitly approved the displayed production preview",
+    "preview": {
+      "path": "/absolute/path/to/layout_preview.png",
+      "sha256": "<sha256>"
+    },
+    "preview_provenance": {
+      "path": "/absolute/path/to/layout_preview.png.provenance.json",
+      "sha256": "<sha256>"
+    },
+    "review_sheet": {
+      "path": "/absolute/path/to/layout_preview.review-sheet.png",
+      "sha256": "<sha256>"
+    },
+    "quality_checks": {
+      "reference_viewed_first": true,
+      "visual_hierarchy_matches": true,
+      "designated_anchor_fixed_left": true,
+      "comparison_panel_on_right": true,
+      "waveform_and_logmel_readable": true,
+      "shared_signed_delta_axes": true,
+      "range_and_median_visible": true,
+      "no_ranking_or_identity_claim": true,
+      "dual_mono_treated_as_non_identifying": true,
+      "limitation_strip_readable": true,
+      "production_renderer_preview": true,
+      "side_by_side_review_sheet_inspected": true
+    }
   }
 }
 ```
+
+`layout_review`はpreview生成時には省略する。
+承認済み構図基準を最初にviewし、production renderer previewとside-by-side review sheetを品質確認してユーザーが明示承認した後にだけ追加する。
+rendererは承認済みpreview、review sheet、provenanceのhash、renderer source hash、render manifest basis、全checkをfail-closedで検証する。
 
 ### Anchor consistency
 
@@ -119,5 +153,7 @@ rendererは入力manifestを直接上書きせず、次を含むeffective manife
 - audio gain・edge fade
 - limitation text
 - output MP4、frame map、audio mapのhash
+- 承認済みlayout reference asset/manifestのpath・hash・寸法
+- 承認済みproduction preview、side-by-side review sheet、preview provenance、renderer source hash、render manifest basis hash、quality checks、approval basis
 
 PCM全配列はmanifestへ埋め込まない。

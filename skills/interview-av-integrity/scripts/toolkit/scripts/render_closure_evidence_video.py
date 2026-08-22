@@ -34,6 +34,10 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
 from video_integrity_analyzer.media import probe_video_frame_timing  # noqa: E402
+from video_integrity_analyzer.layout_reference import (  # noqa: E402
+    load_approved_layout_reference,
+    verify_approved_preview,
+)
 
 
 OUTPUT_WIDTH = 1920
@@ -50,6 +54,8 @@ WAVEFORM_HEIGHT = OUTPUT_HEIGHT - WAVEFORM_Y
 MISSING_COLOR = "#ff4d5a"
 REFERENCE_COLOR = "#42d47e"
 CYAN = "#58d6ff"
+WAVEFORM_COLOR = "#55dbe9"
+CLOSURE_WINDOW_COLOR = "#f4dd62"
 WHITE = "#f7f9fc"
 MUTED = "#a8b3c2"
 PANEL = "#121923"
@@ -59,6 +65,8 @@ GRID = "#2b3543"
 DEFAULT_MOUTH_ROI = (0.38, 0.50, 0.62, 0.78)
 MOUTH_INSET_XYXY = (1396, HEADER_HEIGHT + 26, 1882, HEADER_HEIGHT + 342)
 DEFAULT_NOTE = "破裂音前後の口唇運動を比較"
+MISSING_LEGEND = "赤：閉鎖確認できず"
+REFERENCE_LEGEND = "緑：同期/閉鎖あり参照"
 LATE_CONTACT_LIMITATION = "後続音素の口形である可能性あり。"
 CAUSAL_LIMITATION = (
     "本資料は、録画内の音響開放時刻と可視的な口唇接触を並べた視覚資料です。"
@@ -637,9 +645,43 @@ def _draw_waveform(
     upper = [(int(x), int(round(center_y - amplitude * wave_height))) for x, amplitude in zip(xs, envelope)]
     lower = [(int(x), int(round(center_y + amplitude * wave_height))) for x, amplitude in reversed(list(zip(xs, envelope)))]
     if upper:
-        draw.polygon(upper + lower, fill="#8ea0b6")
+        draw.polygon(upper + lower, fill=WAVEFORM_COLOR)
     burst_fraction = event.pre_s / (event.pre_s + event.post_s)
     burst_x = int(round(left + (right - left) * burst_fraction))
+
+    # Keep the pre-release visual review interval distinct from the red/green
+    # acoustic release marker.  The bracket is a presentation aid only; the
+    # complete audited interval remains stated verbatim below the waveform.
+    review_start_offset_s = max(-event.pre_s, -0.250)
+    review_start_fraction = (review_start_offset_s + event.pre_s) / (event.pre_s + event.post_s)
+    review_start_x = int(round(left + (right - left) * review_start_fraction))
+    bracket_y = top - 8
+    if review_start_x < burst_x:
+        draw.line(
+            (review_start_x, bracket_y, burst_x, bracket_y),
+            fill=CLOSURE_WINDOW_COLOR,
+            width=4,
+        )
+        draw.line(
+            (review_start_x, bracket_y, review_start_x, top + 3),
+            fill=CLOSURE_WINDOW_COLOR,
+            width=3,
+        )
+        draw.line(
+            (burst_x, bracket_y, burst_x, top + 3),
+            fill=CLOSURE_WINDOW_COLOR,
+            width=3,
+        )
+        closure_label = "閉鎖確認窓"
+        closure_bbox = draw.textbbox((0, 0), closure_label, font=fonts.small)
+        closure_width = closure_bbox[2] - closure_bbox[0]
+        draw.text(
+            ((review_start_x + burst_x - closure_width) // 2, bracket_y - 31),
+            closure_label,
+            fill=CLOSURE_WINDOW_COLOR,
+            font=fonts.small,
+        )
+
     burst_half_width = max(5, int(round((right - left) * 0.018 / (event.pre_s + event.post_s))))
     overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
@@ -688,6 +730,23 @@ def _top_vertical_crop(source: Image.Image) -> tuple[Image.Image, int, float]:
     return crop, top, scale
 
 
+def _mouth_inset_connectors(
+    mapped_roi: tuple[int, int, int, int],
+    inset_box: tuple[int, int, int, int],
+) -> tuple[tuple[tuple[int, int], tuple[int, int]], ...]:
+    """Return two source-ROI-to-inset guide lines clipped to the video strip."""
+    roi_right = min(OUTPUT_WIDTH - 1, max(0, mapped_roi[2]))
+    roi_top = min(HEADER_HEIGHT + VIDEO_HEIGHT - 1, max(HEADER_HEIGHT, mapped_roi[1]))
+    roi_bottom = min(HEADER_HEIGHT + VIDEO_HEIGHT - 1, max(HEADER_HEIGHT, mapped_roi[3]))
+    inset_left = inset_box[0]
+    inset_top = inset_box[1] + 3
+    inset_bottom = inset_box[3] - 3
+    return (
+        ((roi_right, roi_top), (inset_left, inset_top)),
+        ((roi_right, roi_bottom), (inset_left, inset_bottom)),
+    )
+
+
 def render_evidence_frame(
     source_frame: SourceFrame,
     event: EvidenceEvent,
@@ -705,10 +764,54 @@ def render_evidence_frame(
     canvas.paste(top_crop, (0, HEADER_HEIGHT))
     draw = ImageDraw.Draw(canvas)
     draw.rectangle((0, 0, OUTPUT_WIDTH, HEADER_HEIGHT), fill="#080c12")
-    draw.rectangle((0, HEADER_HEIGHT - 4, OUTPUT_WIDTH, HEADER_HEIGHT), fill=event.color)
-    draw.text((32, 17), f"{phone_label} 両唇閉鎖の視覚検証", fill=WHITE, font=fonts.body)
-    case_text = f"{event.category_ja} {category_order}/{category_count}　|　全体 {case_order}/{case_count}　|　{event.event_id}"
-    draw.text((710, 19), case_text, fill=event.color, font=fonts.small)
+    draw.line((0, HEADER_HEIGHT - 1, OUTPUT_WIDTH, HEADER_HEIGHT - 1), fill=GRID, width=1)
+
+    case_chip = (16, 9, 250, 63)
+    draw.rounded_rectangle(case_chip, radius=3, fill="#111821", outline="#566170", width=2)
+    draw.text((34, 20), f"ケース {case_order} / {case_count}", fill=WHITE, font=fonts.body)
+
+    title_text = _ellipsize_text(
+        draw,
+        f"{phone_label} 両唇閉鎖の視覚検証",
+        fonts.body,
+        700,
+    )
+    draw.text((276, 9), title_text, fill=WHITE, font=fonts.body)
+    event_id_text = _ellipsize_text(draw, event.event_id, fonts.tiny, 700)
+    draw.text((278, 43), event_id_text, fill=MUTED, font=fonts.tiny)
+
+    finding_chip = (1008, 8, 1288, 64)
+    finding_label = {
+        "missing": "閉鎖確認できず",
+        "reference": "同期参照" if event.reference_kind == "sync" else "閉鎖あり参照",
+    }[event.category]
+    finding_text = f"{finding_label} {category_order}/{category_count}"
+    finding_text = _ellipsize_text(draw, finding_text, fonts.small, 246)
+    draw.rounded_rectangle(finding_chip, radius=7, fill="#10161f", outline=event.color, width=3)
+    finding_bbox = draw.textbbox((0, 0), finding_text, font=fonts.small)
+    finding_width = finding_bbox[2] - finding_bbox[0]
+    draw.text(
+        (finding_chip[0] + (finding_chip[2] - finding_chip[0] - finding_width) // 2, 24),
+        finding_text,
+        fill=event.color,
+        font=fonts.small,
+    )
+
+    speed_chip = (1304, 9, 1482, 63)
+    speed_text = "1.0× 通常" if phase == "normal" else "0.25× スロー"
+    draw.rounded_rectangle(speed_chip, radius=5, fill="#151c25", outline="#566170", width=2)
+    speed_bbox = draw.textbbox((0, 0), speed_text, font=fonts.tiny)
+    speed_width = speed_bbox[2] - speed_bbox[0]
+    draw.text(
+        (speed_chip[0] + (speed_chip[2] - speed_chip[0] - speed_width) // 2, 26),
+        speed_text,
+        fill=WHITE,
+        font=fonts.tiny,
+    )
+
+    draw.text((1504, 27), MISSING_LEGEND, fill=MISSING_COLOR, font=fonts.tiny)
+    red_bbox = draw.textbbox((1504, 27), MISSING_LEGEND, font=fonts.tiny)
+    draw.text((red_bbox[2] + 17, 27), REFERENCE_LEGEND, fill=REFERENCE_COLOR, font=fonts.tiny)
     timestamp_text = f"原映像 {_source_timestamp(source_frame.time_s)}"
     timestamp_box = (34, HEADER_HEIGHT + 22, 334, HEADER_HEIGHT + 68)
     _rgba_overlay(canvas, timestamp_box, "#090d13", 205)
@@ -730,11 +833,14 @@ def render_evidence_frame(
     draw.rectangle(mapped, outline=event.color, width=4)
 
     inset_box = MOUTH_INSET_XYXY
+    for start, end in _mouth_inset_connectors(mapped, inset_box):
+        draw.line((start, end), fill="#080c12", width=7)
+        draw.line((start, end), fill=WHITE, width=3)
     mouth = source_frame.image.crop((x0, y0, x1, y1))
     mouth_panel = _fit_crop(mouth, inset_box[2] - inset_box[0], inset_box[3] - inset_box[1])
     canvas.paste(mouth_panel, (inset_box[0], inset_box[1]))
     draw = ImageDraw.Draw(canvas)
-    draw.rectangle(inset_box, outline=event.color, width=7)
+    draw.rectangle(inset_box, outline=WHITE, width=5)
     label_box = (inset_box[0] + 12, inset_box[1] + 12, inset_box[0] + 164, inset_box[1] + 51)
     draw.rounded_rectangle(label_box, radius=9, fill="#070b11")
     draw.text((label_box[0] + 15, label_box[1] + 8), "口元拡大", fill=WHITE, font=fonts.tiny)
@@ -1078,6 +1184,7 @@ def write_effective_manifest(
     outro_seconds: float,
     event_gap_seconds: float,
     source_frame_timing: dict[str, object] | None = None,
+    approved_layout_review: dict[str, Any],
 ) -> None:
     """Record the effective, uniform render parameters separately from selection data."""
     intro_frames = max(0, int(round(intro_seconds * OUTPUT_FPS)))
@@ -1179,6 +1286,8 @@ def write_effective_manifest(
                 "waveform_top_px": WAVEFORM_Y,
                 "mouth_inset_xyxy": list(MOUTH_INSET_XYXY),
             },
+            "layout_reference": load_approved_layout_reference(),
+            "layout_review": approved_layout_review,
         },
         "cards": {
             "intro_frames": intro_frames,
@@ -1244,6 +1353,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        layout_reference = load_approved_layout_reference()
+        approved_layout_review = verify_approved_preview(
+            args.manifest.resolve(), layout_reference
+        )
+    except Exception as error:
+        print(
+            f"ERROR: approved layout/preview gate failed: "
+            f"{type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return 1
     manifest = load_manifest(args.manifest.resolve())
     video_path = (args.video or manifest.source_video)
     if video_path is None:
@@ -1303,6 +1424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         outro_seconds=max(0.0, args.outro_seconds),
         event_gap_seconds=max(0.0, args.event_gap_seconds),
         source_frame_timing=frame_timing.as_dict(),
+        approved_layout_review=approved_layout_review,
     )
     if not args.quiet:
         print(f"Rendered: {args.output.resolve()}")

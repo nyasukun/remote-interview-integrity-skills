@@ -33,6 +33,7 @@ from common import (
     limitation_reference_strip,
     sha256,
 )
+from layout_reference import verify_approved_preview, verify_layout_reference
 TOOLKIT_DIR = RENDERING_DIR.parent
 if str(TOOLKIT_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLKIT_DIR))
@@ -268,6 +269,25 @@ def verify(video: Path, effective: Path, frame_map: Path, audio_map: Path, outpu
     _require(effective.stat().st_size <= 262_144, "effective manifest is too large; PCM may be serialized")
     manifest = Path(payload["source_manifest"])
     _require(manifest.is_file() and sha256(manifest) == payload["source_manifest_sha256"], "source manifest hash mismatch")
+    try:
+        current_layout_reference = verify_layout_reference()
+        current_layout_review = verify_approved_preview(manifest, current_layout_reference)
+    except ValueError as error:
+        raise VerificationError(f"layout reference/review verification failed: {error}") from error
+    layout = payload.get("layout", {})
+    _require(
+        layout.get("reference_asset") == current_layout_reference,
+        "effective layout reference provenance mismatch",
+    )
+    _require(
+        layout.get("approved_preview") == current_layout_review,
+        "effective approved-preview provenance mismatch",
+    )
+    _require(
+        (layout.get("width"), layout.get("height"), layout.get("fps"), layout.get("pixel_format"))
+        == (WIDTH, HEIGHT, FPS, "yuv420p"),
+        "effective layout output profile mismatch",
+    )
     clip_manifest = payload.get("clip_manifest", {})
     clip_manifest_path = Path(str(clip_manifest.get("path", "")))
     _require(clip_manifest_path.is_file() and sha256(clip_manifest_path) == clip_manifest.get("sha256"), "clip manifest hash mismatch")
@@ -540,16 +560,21 @@ def verify(video: Path, effective: Path, frame_map: Path, audio_map: Path, outpu
             "authoritative_acoustic_artifacts": {
                 key: entry["sha256"] for key, entry in artifacts.items()
             },
+            "layout_reference_asset": current_layout_reference["asset"]["sha256"],
+            "layout_reference_manifest": current_layout_reference["manifest"]["sha256"],
+            "approved_layout_preview": current_layout_review["preview"]["sha256"],
+            "layout_preview_provenance": current_layout_review["preview_provenance"]["sha256"],
+            "layout_review_sheet": current_layout_review["review_sheet"]["sha256"],
         },
         "effective_manifest_size_bytes": effective.stat().st_size,
         "video": {**video_meta, "frame_count": len(pts), "duration_s": video_end, "max_pts_error_s": max_pts_error, "maximum_limitation_strip_mae": max(banner_errors)},
         "audio": {**audio_meta, "end_s": audio_end, "av_end_difference_s": abs(audio_end - video_end), "clip_checks": checks},
         "mapping": {"frame_rows": len(frame_rows), "audio_phase_rows": len(audio_rows), "clip_order": mapped_ids},
-        "visual_qa": {"status": "PENDING_HUMAN_REVIEW", "contact_sheet": str(contact), "required_checks": ["designated anchor remains fixed in the left panel", "comparison group labels/colors and playheads map correctly", "zero lines, ranges, medians, intro/outro, and permanent limitation are readable"]},
+        "visual_qa": {"status": "PENDING_FINAL_HUMAN_REVIEW", "approved_layout_preview": current_layout_review["preview"], "approved_layout_review_sheet": current_layout_review["review_sheet"], "contact_sheet": str(contact), "required_checks": ["final video remains conformant with the approved production preview and canonical composition reference", "designated anchor remains fixed in the left panel", "comparison group labels/colors and playheads map correctly", "zero lines, ranges, medians, intro/outro, and permanent limitation are readable"]},
         "prohibited_outputs": ["composite similarity", "distance", "ranking", "winner", "speaker identity", "nationality", "affiliation", "intent", "deception"],
     }
     (output_dir / "comparison_verification.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (output_dir / "QA_RESULTS.md").write_text("# Voice-signal comparison QA\n\n**MACHINE PASS — HUMAN VISUAL/AUDITORY REVIEW PENDING**\n\n- Exact 24 fps CFR H.264/yuv420p at 1920×1080\n- AAC stereo 48 kHz\n- Frame/audio maps, provenance hashes, source preservation, and permanent limitation passed\n- No composite, distance, rank, winner, or identity inference\n", encoding="utf-8")
+    (output_dir / "QA_RESULTS.md").write_text("# Voice-signal comparison QA\n\n**MACHINE PASS — FINAL HUMAN VISUAL/AUDITORY REVIEW PENDING**\n\n- Exact 24 fps CFR H.264/yuv420p at 1920×1080\n- AAC stereo 48 kHz\n- Canonical layout reference, approved production preview, side-by-side review sheet, and renderer-source provenance passed\n- Frame/audio maps, provenance hashes, source preservation, and permanent limitation passed\n- No composite, distance, rank, winner, or identity inference\n", encoding="utf-8")
     return result
 
 

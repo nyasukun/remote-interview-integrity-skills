@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "asset_id": "voice-signal-designated-comparison-approved-v1",
+  "role": "user-provided synthetic layout reference; not evidence",
+  "path": "voice-signal-designated-comparison-approved.png",
+  "sha256": "6d85aebbdefa38d886f8f78326e4ebb94b1aa66af797a9a0a4ac03c45311039a",
+  "size_bytes": 1830370,
+  "image": {
+    "format": "PNG",
+    "mode": "RGB",
+    "width": 1672,
+    "height": 941,
+    "has_alpha": false
+  },
+  "authority": {
+    "authoritative": [
+      "overall visual hierarchy and information density",
+      "paired upper panels with waveform and Log-Mel regions",
+      "dark technical-review visual quality",
+      "group-consistent accent colors",
+      "readable lower metric panels and permanent limitation strip"
+    ],
+    "non_authoritative": [
+      "all depicted people and silhouettes",
+      "all text, language labels, numbers, timestamps, and states",
+      "all waveform and spectrogram values",
+      "all density curves and chart geometry",
+      "simultaneous playback shown in the still",
+      "the 1672x941 canvas size"
+    ]
+  },
+  "production_precedence": [
+    "the user-designated clip remains the fixed left anchor",
+    "comparison clips appear one at a time on the right and audio plays sequentially",
+    "shared signed-delta axes keep the designated point at zero",
+    "comparison groups use min-max ranges and medians without composite scores or ranking",
+    "dual-mono channel balance is non-identifying and is omitted as a comparison chart",
+    "final output is 1920x1080, 24 fps CFR, H.264 yuv420p, AAC stereo 48 kHz"
+  ]
+}

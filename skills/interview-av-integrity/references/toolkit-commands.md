@@ -187,7 +187,59 @@ CASE_DIR/.venv/bin/python SKILL_DIR/scripts/build_evidence_manifest.py \
   --output CASE_DIR/evidence/event_manifest.json
 ```
 
-mockup承認後:
+イベントmanifest固定後、本番媒体を読まずにproduction-path previewとside-by-side review sheetを作る。
+このscriptは承認済みsynthetic PNGとasset manifestのhash・寸法を先に検証し、本番 `render_evidence_frame` を合成プレースホルダで呼び出す。
+
+```bash
+CASE_DIR/.venv/bin/python SKILL_DIR/scripts/render_layout_preview.py \
+  --manifest CASE_DIR/evidence/event_manifest.json \
+  --output CASE_DIR/evidence/layout_implementation_preview.png \
+  --review-sheet CASE_DIR/evidence/layout_review_sheet.png \
+  --report CASE_DIR/evidence/layout_preview_provenance.json
+```
+
+provenanceは `PENDING_USER_APPROVAL` の不変な承認前記録である。承認済みreferenceとimplementation previewをreview sheetで並べ、文字・人物・値ではなく、構造と品質を確認する。全checkを目視でPASSしたpreviewだけをユーザーへ示し、そのpreviewの明示承認を得る。
+
+承認後、event manifestのトップレベルへ次を追加する。pathはevent manifest基準の相対pathまたは絶対path、hashは実値を使う。
+
+```json
+{
+  "layout_review": {
+    "status": "APPROVED",
+    "approval_basis": "user explicitly approved the displayed production-path preview",
+    "preview": {
+      "path": "layout_implementation_preview.png",
+      "sha256": "<actual preview sha256>"
+    },
+    "preview_provenance": {
+      "path": "layout_preview_provenance.json",
+      "sha256": "<actual provenance sha256>"
+    },
+    "review_sheet": {
+      "path": "layout_review_sheet.png",
+      "sha256": "<actual review-sheet sha256>"
+    },
+    "quality_checks": {
+      "reference_viewed_first": true,
+      "visual_hierarchy_and_density_match": true,
+      "case_finding_speed_and_legend_readable": true,
+      "source_panel_remains_dominant": true,
+      "mouth_roi_and_same_frame_inset_traceable": true,
+      "mouth_crop_contains_lips_and_jaw": true,
+      "closure_window_and_burst_emphasis_readable": true,
+      "release_marker_and_playhead_readable": true,
+      "japanese_text_readable_at_1920x1080": true,
+      "limitations_and_uncertainty_readable": true,
+      "production_renderer_preview": true,
+      "side_by_side_review_completed": true
+    }
+  }
+}
+```
+
+layout reference、manifest basis、renderer source、preview、provenance、review sheet、approval status、checkのいずれかが不一致・未完了なら、full-render CLIは案件媒体を読む前にFAILする。
+
+レイアウトhard gateがPASSした後:
 
 ```bash
 CASE_DIR/.venv/bin/python SKILL_DIR/scripts/toolkit/scripts/render_closure_evidence_video.py \

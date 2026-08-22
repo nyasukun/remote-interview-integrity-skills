@@ -343,8 +343,18 @@ def draw_limitation_strip(image: Image.Image, text: str) -> None:
     draw.rounded_rectangle((10, top, WIDTH - 10, HEIGHT - 10), radius=11, fill=(12, 25, 34), outline=(88, 105, 117), width=2)
     draw.ellipse((34, top + 16, 74, top + 56), outline=TEXT, width=2)
     draw.text((54, top + 25), "i", anchor="ma", font=font(20, True), fill=TEXT)
-    draw.text((94, top + 20), text, font=font(24, True), fill=TEXT)
-    draw.text((760, top + 26), LIMITATION_DETAIL, font=font(17), fill=MUTED)
+    primary_font = font(24, True)
+    draw.text((94, top + 20), text, font=primary_font, fill=TEXT)
+    primary_right = draw.textbbox((94, top + 20), text, font=primary_font)[2]
+    divider_x = max(760, primary_right + 28)
+    detail_font = font(16)
+    detail_width = draw.textbbox((0, 0), LIMITATION_DETAIL, font=detail_font)[2]
+    if divider_x + 24 + detail_width > WIDTH - 26:
+        detail_font = font(14)
+        detail_width = draw.textbbox((0, 0), LIMITATION_DETAIL, font=detail_font)[2]
+    divider_x = min(divider_x, WIDTH - detail_width - 50)
+    draw.line((divider_x, top + 17, divider_x, top + 57), fill=GRID, width=2)
+    draw.text((divider_x + 24, top + 27), LIMITATION_DETAIL, font=detail_font, fill=MUTED)
 
 
 def limitation_reference_strip(text: str) -> np.ndarray:

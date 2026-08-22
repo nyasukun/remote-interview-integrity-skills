@@ -27,7 +27,7 @@ description: 日本語のGoogle Meet系面談録画（H.264、1920×1080、24fps
 
 - 予備診断だけなら、原本検査と短い複数区間の対照測定で止める。
 - 完全分析なら、[analysis-protocol.md](references/analysis-protocol.md)、[blinded-review.md](references/blinded-review.md)、[artifact-schemas.md](references/artifact-schemas.md)を読む。
-- 比較動画まで作るなら、さらに[evidence-video.md](references/evidence-video.md)と[qa-protocol.md](references/qa-protocol.md)を読む。
+- 比較動画まで作るなら、さらに[evidence-video.md](references/evidence-video.md)、[layout-quality-gate.md](references/layout-quality-gate.md)、[qa-protocol.md](references/qa-protocol.md)を読む。
 - 結論文や契約リスクへ接続するなら、[reporting-boundaries.md](references/reporting-boundaries.md)を読む。
 - 24 fps・48 kHzのMeet系合成録画に限り、[meet-24fps-default-profile.md](references/meet-24fps-default-profile.md)を未検証の参考初期値として読む。
 - 実行コマンドとローカルツールは[toolkit-commands.md](references/toolkit-commands.md)を読む。
@@ -46,8 +46,8 @@ description: 日本語のGoogle Meet系面談録画（H.264、1920×1080、24fps
 8. 候補者自身の閉鎖あり例をpositive controlにし、可能なら同じ録画の他話者もmatched controlにする。イベントを独立標本とみなさず、同期エポック単位で集約する。
 9. 欠測率、除外理由、方向、効果量、不確実性を分離して報告する。話者・端末・回線・会議サービスが交絡するため、群差を原因同定に読み替えない。
 10. 動画用manifestには、固定基準を満たす閉鎖欠如の全件と、決定論的に選んだ閉鎖あり参照例を入れ、原映像時刻順に並べる。
-11. 本動画の前に静止画mockupを作る。imagegenを使う場合は、実録画やその切り出しを添付せず、合成の人物・波形・ダミーラベルだけでレイアウト案を作る。ユーザーの明示承認を得るまで本レンダリングを開始しない。imagegenが利用不能なら同様の合成プレースホルダーをローカル作成する。
-12. 承認済みレイアウトで、原映像、同一フレーム由来の口元inset、音圧波形、固定release marker、playhead、通常速度、0.25xを表示する。時間補間で新しい口形を生成しない。
+11. 動画作業の初めに `assets/layout-references/av-integrity-closure-review-approved.png` を画像として開く。これはユーザー提供の合成layout referenceであり、実案件証拠ではない。文字、人物、値ではなく、構造・情報階層・品質をauthoritative starting layoutとする。別のImageGen conceptから始めない。実案件媒体を使わず、本番と同じ `render_evidence_frame` 経路で合成implementation previewとside-by-side review sheetを作る。参照とpreviewを並べてユーザーに示し、明示承認、preview/provenance/review-sheet hash、全quality checkをinput manifestの `layout_review` へ固定する。そのhard gateがPASSするまでfull renderを開始しない。
+12. 承認済みimplementation previewと同じ本番rendererで、原映像、同一フレーム由来の口元inset、音圧波形、固定release marker、playhead、通常速度、0.25xを1920×1080で表示する。時間補間で新しい口形を生成しない。
 13. effective manifest、全出力フレームのsource map、SHA-256、機械QA、全ケース目視QAを生成する。いずれかがFAILなら完成扱いにしない。
 
 ## 方法上の不変条件

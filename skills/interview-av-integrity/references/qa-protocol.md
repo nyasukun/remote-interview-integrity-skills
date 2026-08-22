@@ -2,7 +2,7 @@
 
 ## 機械QA
 
-1. input event manifest、effective manifest、frame map、MP4のhashを記録する。
+1. input event manifest、effective manifest、frame map、MP4、承認済みlayout asset/manifest、implementation preview/provenance/review sheetのhashを記録する。
 2. event IDが一意、release時刻が有限かつsource範囲内、ROIが0–1内、source時刻順、classification countsが一致することを検証する。
 3. MP4を全編decodeし、video/audio各1stream、codec、1920×1080、24fps CFR、yuv420p、AAC 48kHz、frame count、duration、A/V終端差を検証する。
 4. frame map行数とdecoded frame数を一致させる。
@@ -10,6 +10,7 @@
 6. release marker output時刻がsource releaseと速度写像から1 frame以内で一致することを検証する。
 7. normal/slowの各audio phaseに実音があり、意図しないdropoutがないことを確認する。
 8. 全出力のSHA-256と検証コマンドを保存する。
+9. effective manifestの `render.layout_reference` と `render.layout_review` が、skill内synthetic reference、input-manifest basis、renderer source、明示承認、全quality check、preview/provenance/review-sheet fileの現在hashと一致することを検証する。
 
 CLI終了コード0だけで成功としない。解析smokeでは、attempted件数、`processing_error`、measured/excluded/deferredの内訳も確認し、全attemptedがerrorならFAILにする。
 
@@ -25,6 +26,8 @@ CLI終了コード0だけで成功としない。解析smokeでは、attempted�
 - 欠如/参照の色と文言がmanifestに一致する
 - 遅い接触・音素曖昧性の注記が必要箇所にある
 - intro/outro限定文を読める
+- side-by-side review sheetで、承認済み参照と本番renderer previewの情報階層、領域比率、口元ROIからinsetへの視線誘導、波形/破裂点強調、文字密度を比較した
+- input manifestの `layout_review` がAPPROVEDで、previewを実際に明示承認したbasisと固定checklistの全PASSがある
 
 全normal unique ROI frameとslow reuseをcontact sheetまたは署名で監査する。QA担当は、可能ならrenderer担当と別のagentにする。
 
@@ -38,5 +41,7 @@ CLI終了コード0だけで成功としない。解析smokeでは、attempted�
 - 1 phaseを無音化する
 - wrong fps/resolution/sample rate、decode途中破損
 - 限定文を原因・本人性・国籍・所属の断定へ変える
+- `layout_review`を削除、statusを未承認へ変更、quality checkを1件falseにする
+- preview、provenance、review sheet、renderer source、manifest basis、layout referenceのhashのいずれかを変える
 
 再利用性の最小テストは、過去のevent IDを含まないmissing/reference各1件のnovel manifestがrenderとgeneric QAを通ることである。

@@ -21,6 +21,22 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+PREVIEW_SCRIPT = Path(__file__).resolve().parents[2] / "render_layout_preview.py"
+PREVIEW_SPEC = importlib.util.spec_from_file_location(
+    "av_integrity_render_layout_preview", PREVIEW_SCRIPT
+)
+assert PREVIEW_SPEC is not None and PREVIEW_SPEC.loader is not None
+PREVIEW_MODULE = importlib.util.module_from_spec(PREVIEW_SPEC)
+sys.modules[PREVIEW_SPEC.name] = PREVIEW_MODULE
+PREVIEW_SPEC.loader.exec_module(PREVIEW_MODULE)
+
+from video_integrity_analyzer.layout_reference import (  # noqa: E402
+    REQUIRED_QUALITY_CHECKS,
+    load_approved_layout_reference,
+    sha256_file,
+    verify_approved_preview,
+)
+
 FPS = 24
 REPEAT = 4
 NORMAL_FRAMES = 24
@@ -225,6 +241,72 @@ def _write_synthetic_mp4(path: Path, frame_count: int = 3) -> None:
 
 
 class ClosureEvidenceVerifierTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._layout_temporary = tempfile.TemporaryDirectory()
+        root = Path(cls._layout_temporary.name)
+        cls.input_manifest = root / "input_event_manifest.json"
+        cls.input_manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "title": "Synthetic layout-gate fixture",
+                    "events": [
+                        {
+                            "event_id": "fixture-layout-event",
+                            "source_release_s": 2.0,
+                            "classification": "closure_absent",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        preview = root / "preview.png"
+        review_sheet = root / "review_sheet.png"
+        provenance = root / "preview_provenance.json"
+        PREVIEW_MODULE.render_layout_preview(
+            cls.input_manifest,
+            preview,
+            review_sheet=review_sheet,
+            report=provenance,
+        )
+        payload = json.loads(cls.input_manifest.read_text(encoding="utf-8"))
+        payload["layout_review"] = {
+            "status": "APPROVED",
+            "approval_basis": "synthetic test fixture explicitly approved",
+            "preview": {"path": str(preview), "sha256": sha256_file(preview)},
+            "preview_provenance": {
+                "path": str(provenance),
+                "sha256": sha256_file(provenance),
+            },
+            "review_sheet": {
+                "path": str(review_sheet),
+                "sha256": sha256_file(review_sheet),
+            },
+            "quality_checks": {
+                name: True for name in REQUIRED_QUALITY_CHECKS
+            },
+        }
+        cls.input_manifest.write_text(json.dumps(payload), encoding="utf-8")
+        cls.layout_reference = load_approved_layout_reference()
+        cls.layout_review = verify_approved_preview(
+            cls.input_manifest, cls.layout_reference
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._layout_temporary.cleanup()
+
+    def _synthetic_manifest_and_rows(self) -> tuple[dict, list[dict[str, str]]]:
+        manifest, rows = _synthetic_manifest_and_rows()
+        manifest["input_event_manifest"] = str(self.input_manifest)
+        manifest["render"]["layout_reference"] = copy.deepcopy(
+            self.layout_reference
+        )
+        manifest["render"]["layout_review"] = copy.deepcopy(self.layout_review)
+        return manifest, rows
+
     def _verify_manifest(self, manifest: dict):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "manifest.json"
@@ -232,7 +314,7 @@ class ClosureEvidenceVerifierTests(unittest.TestCase):
             return MODULE.verify_manifest(path)
 
     def test_novel_two_case_manifest_and_frame_map_pass(self) -> None:
-        manifest, rows = _synthetic_manifest_and_rows()
+        manifest, rows = self._synthetic_manifest_and_rows()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest_path = root / "manifest.json"
@@ -248,55 +330,72 @@ class ClosureEvidenceVerifierTests(unittest.TestCase):
         self.assertEqual(map_metrics["slow_frame_rows"], 2 * SLOW_FRAMES)
 
     def test_duplicate_event_id_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["cases"][1]["event_id"] = manifest["cases"][0]["event_id"]
         with self.assertRaisesRegex(MODULE.VerificationError, "not unique"):
             self._verify_manifest(manifest)
 
     def test_non_chronological_source_order_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["cases"][1]["source_release_s"] = 1.0
         with self.assertRaisesRegex(MODULE.VerificationError, "chronological"):
             self._verify_manifest(manifest)
 
     def test_non_sequential_order_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["cases"][1]["order"] = 7
         with self.assertRaisesRegex(MODULE.VerificationError, "order must"):
             self._verify_manifest(manifest)
 
     def test_out_of_bounds_mouth_roi_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["cases"][0]["mouth_crop_normalized_xyxy"] = [0.2, 0.4, 1.2, 0.7]
         with self.assertRaisesRegex(MODULE.VerificationError, "mouth ROI"):
             self._verify_manifest(manifest)
 
     def test_marker_formula_change_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["cases"][0]["slow"]["marker_output_s"] += 0.01
         with self.assertRaisesRegex(MODULE.VerificationError, "marker"):
             self._verify_manifest(manifest)
 
     def test_classification_count_mismatch_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["classification_counts"]["closure_absent"] = 2
         with self.assertRaisesRegex(MODULE.VerificationError, "actual"):
             self._verify_manifest(manifest)
 
     def test_incomplete_limitation_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["render"]["limitation"] = "原因だけは判定しません。"
         with self.assertRaisesRegex(MODULE.VerificationError, "identity"):
             self._verify_manifest(manifest)
 
     def test_unverified_source_cfr_is_rejected(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest["render"]["source_frame_timing"]["is_cfr"] = False
         with self.assertRaisesRegex(MODULE.VerificationError, "strict CFR"):
             self._verify_manifest(manifest)
 
+    def test_layout_reference_hash_tampering_is_rejected(self) -> None:
+        manifest, _ = self._synthetic_manifest_and_rows()
+        manifest["render"]["layout_reference"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(MODULE.VerificationError, "layout_reference"):
+            self._verify_manifest(manifest)
+
+    def test_missing_or_tampered_layout_review_is_rejected(self) -> None:
+        manifest, _ = self._synthetic_manifest_and_rows()
+        del manifest["render"]["layout_review"]
+        with self.assertRaisesRegex(MODULE.VerificationError, "layout_review"):
+            self._verify_manifest(manifest)
+
+        manifest, _ = self._synthetic_manifest_and_rows()
+        manifest["render"]["layout_review"]["preview"]["sha256"] = "f" * 64
+        with self.assertRaisesRegex(MODULE.VerificationError, "layout_review"):
+            self._verify_manifest(manifest)
+
     def test_non_declared_slow_hold_is_rejected(self) -> None:
-        manifest, rows = _synthetic_manifest_and_rows()
+        manifest, rows = self._synthetic_manifest_and_rows()
         slow_rows = [
             row for row in rows
             if row["event_id"] == "novel-alpha" and row["phase"] == "slow"
@@ -310,7 +409,7 @@ class ClosureEvidenceVerifierTests(unittest.TestCase):
                 MODULE.verify_frame_map(path, manifest)
 
     def test_gap_hold_change_is_rejected(self) -> None:
-        manifest, rows = _synthetic_manifest_and_rows()
+        manifest, rows = self._synthetic_manifest_and_rows()
         gap = next(row for row in rows
                    if row["event_id"] == "novel-alpha" and row["phase"] == "gap")
         gap["source_frame_index"] = str(int(gap["source_frame_index"]) - 1)
@@ -321,7 +420,7 @@ class ClosureEvidenceVerifierTests(unittest.TestCase):
                 MODULE.verify_frame_map(path, manifest)
 
     def test_spec_compliant_synthetic_mp4_fully_decodes(self) -> None:
-        manifest, _ = _synthetic_manifest_and_rows()
+        manifest, _ = self._synthetic_manifest_and_rows()
         manifest = copy.deepcopy(manifest)
         manifest["output"] = {"total_frame_count": 3, "expected_duration_s": 3 / FPS}
         with tempfile.TemporaryDirectory() as temporary:

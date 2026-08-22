@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a local layout preview with synthetic waveform/STFT placeholders."""
+"""Render a local layout preview with synthetic waveform/Log-Mel placeholders."""
 
 from __future__ import annotations
 
@@ -22,6 +22,12 @@ for directory in (RENDERING_DIR, TOOLKIT_DIR):
 from acoustics.verify_artifacts import verify_acoustic_dir  # noqa: E402
 from adapter import display_metrics  # noqa: E402
 from common import font, load_manifest  # noqa: E402
+from layout_reference import (  # noqa: E402
+    preview_provenance_path,
+    review_sheet_path,
+    verify_layout_reference,
+    write_preview_provenance,
+)
 from render import ClipData, _clip_frame, _summary  # noqa: E402
 
 
@@ -51,6 +57,9 @@ def _placeholder_spectrogram(
 
 
 def render_preview(manifest: Path, output: Path) -> Path:
+    # Fail before reading case data if the approved composition reference has
+    # been removed, replaced, or changed.
+    reference = verify_layout_reference()
     spec = load_manifest(manifest)
     artifact_manifest = Path(spec.acoustic_artifacts["artifact_manifest"]["path"])
     acoustic_features = Path(spec.acoustic_artifacts["acoustic_features"]["path"])
@@ -102,13 +111,14 @@ def render_preview(manifest: Path, output: Path) -> Path:
     )
     draw.text(
         (32, 17),
-        "LAYOUT PREVIEW — waveform / STFT are synthetic placeholders",
+        "LAYOUT PREVIEW — waveform / Log-Mel are synthetic placeholders",
         font=font(15, True),
         fill=(238, 242, 245),
     )
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     image.save(output)
+    write_preview_provenance(output, manifest, reference)
     return output
 
 
@@ -123,6 +133,8 @@ def main() -> int:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
     print(output)
+    print(review_sheet_path(output))
+    print(preview_provenance_path(output))
     return 0
 
 

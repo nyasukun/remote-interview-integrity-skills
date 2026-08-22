@@ -29,6 +29,29 @@ MediaPipe Face Landmarkerモデルは再配布せず、必要な利用者が公�
 - 出力: JSON/CSV/図、指定中心preview、比較動画、frame/audio map、QA
 - 非対応: 声紋照合、同一話者確率、総合類似度、本人・国籍・所属・採否判断
 
+## Approved layout references
+
+動画を作る場合は、次の**承認済みレイアウト参照**を既定の出発点にします。
+新しいmockupを画像生成で作り直さず、本番rendererが合成入力から作ったpreviewをこの参照と照合します。
+
+### A/V integrity closure review
+
+[原寸PNGを開く](skills/interview-av-integrity/assets/layout-references/av-integrity-closure-review-approved.png)
+
+![A/V integrityの承認済み合成レイアウト参照](skills/interview-av-integrity/assets/layout-references/av-integrity-closure-review-approved.png)
+
+### Designated-centered voice signal comparison
+
+[原寸PNGを開く](skills/interview-voice-signal-comparison/assets/layout-references/voice-signal-designated-comparison-approved.png)
+
+![指定区間中心の声質比較に使う承認済み合成レイアウト参照](skills/interview-voice-signal-comparison/assets/layout-references/voice-signal-designated-comparison-approved.png)
+
+この2枚は視覚階層、panel配置、配色、情報密度の基準です。
+表示する波形、spectrogram、指標、labelは入力と解析artifactから生成し、参照画像内の図形や値を分析結果として転用しません。
+
+画像は完全合成であり、実在する応募者や面談録画を含みません。
+公開監査は、2つの固定パスについてSHA-256と1672×941 pxの寸法を検証し、それ以外の画像と媒体を拒否します。
+
 ## Install
 
 各フォルダをCodexの個人skillsディレクトリへコピーします。
@@ -55,7 +78,8 @@ skills/interview-voice-signal-comparison/   -> <codex-skills>/interview-voice-si
 
 各スキルをCodexの`skill-creator`に含まれる`quick_validate.py`で検証し、各toolkitのunit testsを実行してください。
 環境依存のMediaPipe preflightは、案件媒体を読む前に合成フレームだけで実行します。
-公開対象の静的検査には`python scripts/audit_public_release.py`を使用できます。
+公開前に`python3 scripts/audit_public_release.py`でworking tree全体を検査してください。
+続けて`python3 scripts/audit_public_release.py --staged`を実行し、Git indexへstageしたbyte列とmodeを検査してください。
 
 ## Licensing
 

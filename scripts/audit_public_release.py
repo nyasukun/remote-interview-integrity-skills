@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
+import stat
+import struct
 import subprocess
 import sys
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 
+MAX_FILE_SIZE = 5 * 1024 * 1024
+REGULAR_GIT_MODES = {"100644", "100755"}
 MEDIA_SUFFIXES = {
     ".aac", ".avi", ".bmp", ".flac", ".gif", ".jpeg", ".jpg", ".m4a",
     ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".png", ".srt", ".tif",
@@ -32,46 +38,248 @@ TEXT_PATTERNS = {
     "OpenAI-style secret": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     "Google API key": re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),
+    "email address": re.compile(
+        r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\b"
+    ),
+    "Japanese mobile number": re.compile(
+        r"(?<![0-9])0[789]0(?:[- ]?[0-9]{4}){2}(?![0-9])"
+    ),
+    "Google Drive URL": re.compile(r"https?://drive\.google\.com/"),
+    "signed URL credential": re.compile(
+        r"(?:X-Amz-(?:Credential|Signature)|[?&](?:api[_-]?key|signature|token)=)",
+        re.IGNORECASE,
+    ),
 }
 
 
-def repository_files(root: Path, staged: bool) -> list[Path]:
-    if staged:
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        names = [line for line in result.stdout.splitlines() if line]
-        return [root / name for name in names]
-    return sorted(
-        path for path in root.rglob("*") if ".git" not in path.relative_to(root).parts
+@dataclass(frozen=True)
+class ApprovedSyntheticPng:
+    sha256: str
+    width: int
+    height: int
+
+
+APPROVED_SYNTHETIC_PNGS = {
+    PurePosixPath(
+        "skills/interview-av-integrity/assets/layout-references/"
+        "av-integrity-closure-review-approved.png"
+    ): ApprovedSyntheticPng(
+        sha256="a847a47025555f72ae83046de1169f0022105f4ef10c9028a52757200020b84c",
+        width=1672,
+        height=941,
+    ),
+    PurePosixPath(
+        "skills/interview-voice-signal-comparison/assets/layout-references/"
+        "voice-signal-designated-comparison-approved.png"
+    ): ApprovedSyntheticPng(
+        sha256="6d85aebbdefa38d886f8f78326e4ebb94b1aa66af797a9a0a4ac03c45311039a",
+        width=1672,
+        height=941,
+    ),
+}
+
+
+@dataclass(frozen=True)
+class RepositoryEntry:
+    relative: PurePosixPath
+    mode: str
+    size: int
+    data: bytes | None
+    read_error: bool = False
+
+
+class AuditInputError(RuntimeError):
+    """Raised when the repository or index cannot be inspected safely."""
+
+
+def _git_bytes(root: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        check=False,
+        capture_output=True,
     )
+    if result.returncode != 0:
+        command = " ".join(("git", *args))
+        raise AuditInputError(f"Git command failed: {command}")
+    return result.stdout
 
 
-def audit(root: Path, staged: bool) -> list[str]:
+def _staged_names(root: Path) -> list[str]:
+    raw = _git_bytes(
+        root,
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+        "--diff-filter=ACMRT",
+        "--",
+    )
+    try:
+        names = [item.decode("utf-8") for item in raw.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise AuditInputError("A staged path is not valid UTF-8") from exc
+    return sorted(names)
+
+
+def _staged_entry(root: Path, name: str) -> RepositoryEntry:
+    raw = _git_bytes(root, "ls-files", "--stage", "-z", "--", name)
+    records = [record for record in raw.split(b"\0") if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise AuditInputError(f"Cannot resolve one stage-0 index entry: {name}")
+    metadata, raw_path = records[0].split(b"\t", 1)
+    try:
+        mode, object_id, stage_number = metadata.decode("ascii").split()
+        indexed_name = raw_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AuditInputError(f"Cannot parse the index entry: {name}") from exc
+    if stage_number != "0" or indexed_name != name:
+        raise AuditInputError(f"Index entry is not an unambiguous stage-0 path: {name}")
+
+    try:
+        size = int(_git_bytes(root, "cat-file", "-s", object_id).strip())
+    except ValueError as exc:
+        raise AuditInputError(f"Cannot determine the staged object size: {name}") from exc
+
+    data = None
+    if mode in REGULAR_GIT_MODES and size <= MAX_FILE_SIZE:
+        data = _git_bytes(root, "cat-file", "blob", object_id)
+        if len(data) != size:
+            raise AuditInputError(f"Staged object size changed during audit: {name}")
+    return RepositoryEntry(PurePosixPath(name), mode, size, data)
+
+
+def _working_tree_entries(root: Path) -> list[RepositoryEntry]:
+    entries: list[RepositoryEntry] = []
+    for path in sorted(root.rglob("*")):
+        relative_path = path.relative_to(root)
+        if ".git" in relative_path.parts:
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError:
+            entries.append(
+                RepositoryEntry(
+                    PurePosixPath(relative_path.as_posix()),
+                    "unreadable",
+                    0,
+                    None,
+                    read_error=True,
+                )
+            )
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        relative = PurePosixPath(relative_path.as_posix())
+        if stat.S_ISLNK(metadata.st_mode):
+            entries.append(RepositoryEntry(relative, "120000", metadata.st_size, None))
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            entries.append(RepositoryEntry(relative, "unsupported", metadata.st_size, None))
+            continue
+        mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+        if metadata.st_size > MAX_FILE_SIZE:
+            entries.append(RepositoryEntry(relative, mode, metadata.st_size, None))
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            entries.append(
+                RepositoryEntry(relative, mode, metadata.st_size, None, read_error=True)
+            )
+            continue
+        if len(data) != metadata.st_size:
+            entries.append(
+                RepositoryEntry(relative, mode, len(data), None, read_error=True)
+            )
+            continue
+        entries.append(RepositoryEntry(relative, mode, metadata.st_size, data))
+    return entries
+
+
+def repository_entries(root: Path, staged: bool) -> list[RepositoryEntry]:
+    if staged:
+        return [_staged_entry(root, name) for name in _staged_names(root)]
+    return _working_tree_entries(root)
+
+
+def _png_dimensions(data: bytes) -> tuple[int, int]:
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("invalid PNG signature")
+    if data[8:12] != b"\x00\x00\x00\r" or data[12:16] != b"IHDR":
+        raise ValueError("IHDR is not the first 13-byte PNG chunk")
+    return struct.unpack(">II", data[16:24])
+
+
+def _audit_approved_png(
+    entry: RepositoryEntry,
+    approved: ApprovedSyntheticPng,
+) -> list[str]:
+    relative = entry.relative
     findings: list[str] = []
-    for path in repository_files(root, staged):
-        relative = path.relative_to(root)
+    if entry.mode != "100644":
+        findings.append(
+            f"approved PNG mode mismatch: {relative} (expected 100644)"
+        )
+    if entry.data is None:
+        findings.append(f"approved PNG cannot be validated: {relative}")
+        return findings
+    digest = hashlib.sha256(entry.data).hexdigest()
+    if digest != approved.sha256:
+        findings.append(f"approved PNG SHA-256 mismatch: {relative}")
+    try:
+        dimensions = _png_dimensions(entry.data)
+    except ValueError:
+        findings.append(f"approved PNG structure is invalid: {relative}")
+    else:
+        expected = (approved.width, approved.height)
+        if dimensions != expected:
+            findings.append(
+                "approved PNG dimensions mismatch: "
+                f"{relative} (expected {approved.width}x{approved.height})"
+            )
+    return findings
+
+
+def audit_entries(entries: list[RepositoryEntry]) -> list[str]:
+    findings: list[str] = []
+    for entry in entries:
+        relative = entry.relative
         lowered_parts = {part.lower() for part in relative.parts}
-        if path.is_symlink():
+        if relative.is_absolute() or ".." in relative.parts:
+            findings.append(f"unsafe path: {relative}")
+            continue
+        if entry.mode == "120000":
             findings.append(f"symlink: {relative}")
             continue
-        if not path.is_file():
+        if entry.mode not in REGULAR_GIT_MODES:
+            findings.append(f"unsupported file mode: {relative} ({entry.mode})")
             continue
-        name = path.name.lower()
-        if path.suffix.lower() in MEDIA_SUFFIXES | SECRET_SUFFIXES:
-            findings.append(f"forbidden file type: {relative}")
+        if entry.read_error:
+            findings.append(f"unreadable file: {relative}")
+            continue
+
+        name = relative.name.lower()
         if name in FORBIDDEN_NAMES or (name.startswith(".env") and name != ".env.example"):
             findings.append(f"forbidden filename: {relative}")
         if lowered_parts & FORBIDDEN_PARTS:
             findings.append(f"private/generated directory: {relative}")
-        if path.stat().st_size > 5 * 1024 * 1024:
+        if entry.size > MAX_FILE_SIZE:
             findings.append(f"file larger than 5 MiB: {relative}")
+
+        approved_png = APPROVED_SYNTHETIC_PNGS.get(relative)
+        if approved_png is not None:
+            findings.extend(_audit_approved_png(entry, approved_png))
+            continue
+
+        if relative.suffix.lower() in MEDIA_SUFFIXES | SECRET_SUFFIXES:
+            findings.append(f"forbidden file type: {relative}")
+        if entry.data is None:
+            continue
         try:
-            text = path.read_text(encoding="utf-8")
+            text = entry.data.decode("utf-8")
         except UnicodeDecodeError:
             findings.append(f"non-text file: {relative}")
             continue
@@ -83,16 +291,21 @@ def audit(root: Path, staged: bool) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--staged", action="store_true", help="scan staged files only")
+    parser.add_argument("--staged", action="store_true", help="scan staged index blobs only")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    files = repository_files(root, args.staged)
-    findings = audit(root, args.staged)
+    try:
+        entries = repository_entries(root, args.staged)
+        findings = audit_entries(entries)
+    except AuditInputError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
     if findings:
         for finding in findings:
             print(f"FAIL: {finding}", file=sys.stderr)
         return 1
-    print(f"PASS: audited {len(files)} paths")
+    source = "staged index entries" if args.staged else "working-tree paths"
+    print(f"PASS: audited {len(entries)} {source}")
     return 0
 
 

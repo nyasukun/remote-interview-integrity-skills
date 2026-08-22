@@ -98,8 +98,21 @@ PYTHONDONTWRITEBYTECODE=1 \
 
 ## 5. 動画とmappingを生成する
 
-本番の前に、実録画を外部送信せずローカルでpreviewを作る。
-previewは実際のgroup名・色・指標rangeを使うが、波形とSTFTは合成placeholderであり、その旨を画像内に表示する。
+最初にユーザー提供のsynthetic layout referenceをviewし、integrity gateを通す。
+この画像は証拠ではない。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 \
+"$VOICE_PYTHON" "$VOICE_SKILL_DIR/scripts/verify_layout_reference.py"
+```
+
+`status=PASS`、asset SHA-256
+`6d85aebbdefa38d886f8f78326e4ebb94b1aa66af797a9a0a4ac03c45311039a`、
+1672×941 RGB PNGを確認する。
+新規のimagegen案を作らない。
+
+本番の前に、実録画を外部送信せずproduction renderer pathでpreviewを作る。
+previewは実際のgroup名・色・指標rangeを使うが、波形とLog-Melは合成placeholderであり、その旨を画像内に表示する。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 \
@@ -108,7 +121,59 @@ PYTHONDONTWRITEBYTECODE=1 \
   --output "/path/to/output/layout_preview.png"
 ```
 
-previewをユーザーに示し、既定レイアウトから大きく変える場合は承認を得る。
+`layout_preview.review-sheet.png`と`layout_preview.png.provenance.json`も同時生成される。
+review sheetは左に基準画像、右にproduction previewを置いた比較用成果物である。
+provenanceには基準asset/manifestのhash・寸法、preview hash・寸法、review sheet hash・寸法、renderer source hash、`layout_review`を除いたrender manifest basis hashが入る。
+
+review sheetを原寸で目視し、次を全件確認する。
+
+- 構図と情報密度が基準画像と同等で、文字が切れていない
+- 指定anchorは左に固定、比較clipは右に1件ずつ表示される
+- waveform、Log-Mel、playheadが読める
+- 下段は共有signed-delta axisで指定値が0、群rangeとmedianが読める
+- score、distance、ranking、winner、本人性表示がない
+- dual-monoを識別的chartとして表示しない
+- limitation stripが読める
+
+全件PASSしたreview sheetだけをユーザーへ示し、明示承認を得る。
+承認後にrender manifestへ次を追加する。pathはrender manifest基準の相対pathまたは絶対path、hashは実値を入れる。
+
+```json
+{
+  "layout_review": {
+    "status": "APPROVED",
+    "approval_basis": "user explicitly approved the displayed production preview",
+    "preview": {
+      "path": "/path/to/output/layout_preview.png",
+      "sha256": "<actual preview sha256>"
+    },
+    "preview_provenance": {
+      "path": "/path/to/output/layout_preview.png.provenance.json",
+      "sha256": "<actual preview provenance sha256>"
+    },
+    "review_sheet": {
+      "path": "/path/to/output/layout_preview.review-sheet.png",
+      "sha256": "<actual review sheet sha256>"
+    },
+    "quality_checks": {
+      "reference_viewed_first": true,
+      "visual_hierarchy_matches": true,
+      "designated_anchor_fixed_left": true,
+      "comparison_panel_on_right": true,
+      "waveform_and_logmel_readable": true,
+      "shared_signed_delta_axes": true,
+      "range_and_median_visible": true,
+      "no_ranking_or_identity_claim": true,
+      "dual_mono_treated_as_non_identifying": true,
+      "limitation_strip_readable": true,
+      "production_renderer_preview": true,
+      "side_by_side_review_sheet_inspected": true
+    }
+  }
+}
+```
+
+基準asset、preview、review sheet、provenance、renderer source、basis hash、承認status、checkのいずれかが不一致ならrendererは本番前にFAILする。
 承認後に本番動画を生成する。
 
 ```bash
@@ -137,6 +202,7 @@ PYTHONDONTWRITEBYTECODE=1 \
 
 終了コード0だけで完成扱いにしない。
 `qa/comparison_verification.json`の`status`が`PASS`であることを確認し、`qa/VISUAL_QA_contact_sheet.png`を人間が確認する。
+QA JSONのhash欄にはlayout reference asset/manifest、承認preview、review sheet、preview provenanceも含まれる。
 機械QAがPASSでも、視覚・聴取QAが未完ならその状態を明記する。
 
 ## 7. 開発時の回帰テスト

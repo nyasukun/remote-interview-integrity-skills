@@ -247,6 +247,10 @@ class ClosureEvidenceRendererTests(unittest.TestCase):
                 outro_seconds=2.0,
                 event_gap_seconds=0.25,
                 source_frame_timing={"is_cfr": True, "expected_fps": 24.0},
+                approved_layout_review={
+                    "status": "APPROVED",
+                    "fixture": "unit-test record; CLI verifies real preview provenance",
+                },
             )
             payload = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(payload["render"]["slow_source_frame_repeat"], 4)
@@ -257,9 +261,86 @@ class ClosureEvidenceRendererTests(unittest.TestCase):
             payload["render"]["layout"]["mouth_inset_xyxy"],
             list(MODULE.MOUTH_INSET_XYXY),
         )
+        self.assertEqual(
+            payload["render"]["layout_reference"]["sha256"],
+            "a847a47025555f72ae83046de1169f0022105f4ef10c9028a52757200020b84c",
+        )
+        self.assertEqual(payload["render"]["layout_review"]["status"], "APPROVED")
         self.assertEqual(payload["cases"][0]["normal"]["source_start_s"], 9.2)
         self.assertEqual(payload["cases"][0]["classification"], "contact_reference")
         self.assertGreater(payload["output"]["expected_duration_s"], 0.0)
+
+    def test_production_frame_preserves_approved_layout_visual_contract(self) -> None:
+        self.assertEqual(MODULE.MISSING_LEGEND, "赤：閉鎖確認できず")
+        self.assertNotIn("欠如", MODULE.MISSING_LEGEND)
+        self.assertNotIn("閉鎖なし", MODULE.MISSING_LEGEND)
+
+        event = MODULE.EvidenceEvent(
+            event_id="layout-contract",
+            release_s=10.0,
+            category="missing",
+            label="synthetic /p/",
+            note="synthetic layout fixture",
+            pre_s=19 / MODULE.OUTPUT_FPS,
+            post_s=19 / MODULE.OUTPUT_FPS,
+            mouth_roi=MODULE.DEFAULT_MOUTH_ROI,
+            order=1,
+        )
+        source = MODULE.SourceFrame(
+            time_s=10.0,
+            source_frame_index=240,
+            image=Image.new("RGB", (1920, 1080), "#030405"),
+        )
+        envelope = np.full(1920 - 144, 0.20, dtype=np.float32)
+        rendered = MODULE.render_evidence_frame(
+            source,
+            event,
+            envelope,
+            "slow",
+            3,
+            7,
+            3,
+            5,
+            MODULE.make_fonts(),
+            "/p/",
+        )
+        self.assertEqual(rendered.size, (1920, 1080))
+        pixels = np.asarray(rendered)
+
+        def count(hex_color: str) -> int:
+            rgb = MODULE._hex_rgb(hex_color)
+            return int(np.count_nonzero(np.all(pixels == rgb, axis=2)))
+
+        self.assertGreater(count(MODULE.WAVEFORM_COLOR), 1_000)
+        self.assertGreater(count(MODULE.CLOSURE_WINDOW_COLOR), 300)
+        self.assertGreater(count(MODULE.MISSING_COLOR), 300)
+
+        mapped_roi = (730, 396, 1190, 698)
+        connectors = MODULE._mouth_inset_connectors(
+            mapped_roi,
+            MODULE.MOUTH_INSET_XYXY,
+        )
+        self.assertEqual(len(connectors), 2)
+        for start, end in connectors:
+            midpoint_x = (start[0] + end[0]) // 2
+            midpoint_y = (start[1] + end[1]) // 2
+            patch = pixels[
+                midpoint_y - 3 : midpoint_y + 4,
+                midpoint_x - 3 : midpoint_x + 4,
+            ]
+            self.assertTrue(
+                np.any(np.all(patch == MODULE._hex_rgb(MODULE.WHITE), axis=2)),
+                f"connector lacks a white center near {(midpoint_x, midpoint_y)}",
+            )
+
+        self.assertTrue(
+            np.all(pixels[8, 1148] == MODULE._hex_rgb(MODULE.MISSING_COLOR)),
+            "finding chip must retain the case-classification outline",
+        )
+        self.assertTrue(
+            np.all(pixels[9, 1393] == MODULE._hex_rgb("#566170")),
+            "speed chip must remain visually separate from the finding chip",
+        )
 
 
 if __name__ == "__main__":

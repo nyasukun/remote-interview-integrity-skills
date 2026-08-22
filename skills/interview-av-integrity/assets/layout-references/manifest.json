@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "reference_id": "av-integrity-closure-review-approved-v1",
+  "status": "approved_starting_layout",
+  "provenance": "user_provided_synthetic_layout_reference",
+  "case_evidence": false,
+  "authoritative_scope": "layout_structure_and_visual_quality_only",
+  "asset": {
+    "path": "assets/layout-references/av-integrity-closure-review-approved.png",
+    "sha256": "a847a47025555f72ae83046de1169f0022105f4ef10c9028a52757200020b84c",
+    "byte_size": 1778626,
+    "width": 1672,
+    "height": 941,
+    "color_mode": "RGB"
+  },
+  "authority": {
+    "authoritative_attributes": [
+      "dark evidence-review visual system and information density",
+      "top status row with case count, finding, playback speed, and color legend",
+      "large source-video panel with a marked mouth ROI",
+      "same-frame mouth inset connected to the source ROI",
+      "lower waveform panel with closure-review window, burst highlight, release marker, and playhead",
+      "prominent red/green evidence semantics with neutral supporting colors",
+      "clear Japanese typography and readable hierarchy at 1920x1080"
+    ],
+    "adaptable_attributes": [
+      "synthetic person and room shown in the reference",
+      "dummy case number, timestamps, words, phoneme labels, and waveform values",
+      "exact source crop and mouth ROI required by the case",
+      "normal or slow playback state",
+      "case-specific warnings and uncertainty text"
+    ]
+  },
+  "quality_gate": {
+    "new_imagegen_concept_allowed": false,
+    "production_renderer_preview_required": true,
+    "side_by_side_review_required": true,
+    "explicit_user_approval_required_before_full_render": true,
+    "case_media_allowed_in_preview": false
+  }
+}

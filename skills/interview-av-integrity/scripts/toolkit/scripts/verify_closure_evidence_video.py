@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import statistics
+import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,17 @@ from typing import Any, Callable, Sequence
 
 import av
 import numpy as np
+
+
+PROJECT = Path(__file__).resolve().parents[1]
+if str(PROJECT) not in sys.path:
+    sys.path.insert(0, str(PROJECT))
+
+from video_integrity_analyzer.layout_reference import (  # noqa: E402
+    LayoutReferenceError,
+    validate_effective_layout_reference,
+    validate_effective_layout_review,
+)
 
 
 ALLOWED_CLASSIFICATIONS = ("closure_absent", "contact_reference", "sync_reference")
@@ -141,11 +153,29 @@ def _render_spec(manifest: dict[str, Any]) -> dict[str, Any]:
     x0, y0, x1, y1 = inset_xyxy
     _require(0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height,
              f"render mouth inset is outside the output frame: {inset_xyxy}")
+    try:
+        layout_reference = validate_effective_layout_reference(
+            render.get("layout_reference")
+        )
+        input_manifest_value = manifest.get("input_event_manifest")
+        if not isinstance(input_manifest_value, str) or not input_manifest_value.strip():
+            raise LayoutReferenceError(
+                "input_event_manifest is required for layout approval verification"
+            )
+        layout_review = validate_effective_layout_review(
+            render.get("layout_review"),
+            Path(input_manifest_value).expanduser().resolve(),
+            layout_reference,
+        )
+    except LayoutReferenceError as error:
+        raise VerificationError(str(error)) from error
     return {
         "width": width, "height": height, "fps": fps,
         "audio_rate": audio_rate, "slow_repeat": repeat,
         "frame_s": 1.0 / fps, "mouth_inset_xyxy": inset_xyxy,
         "limitation": limitation,
+        "layout_reference": layout_reference,
+        "layout_review": layout_review,
     }
 
 

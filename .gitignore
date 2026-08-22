@@ -33,6 +33,10 @@ secrets.*
 *.tif
 *.tiff
 
+# Reviewed synthetic layout references. Keep every other raster image ignored.
+!skills/interview-av-integrity/assets/layout-references/av-integrity-closure-review-approved.png
+!skills/interview-voice-signal-comparison/assets/layout-references/voice-signal-designated-comparison-approved.png
+
 # Case material and generated evidence
 case/
 cases/
