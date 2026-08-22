@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "render_closure_evidence_video.py"
@@ -162,6 +162,45 @@ class ClosureEvidenceRendererTests(unittest.TestCase):
         self.assertEqual(event.category_ja, "閉鎖あり参照")
         self.assertEqual(event.classification, "contact_reference")
 
+    def test_required_observation_wording_matches_the_skill_contract(self) -> None:
+        event = MODULE.parse_event(
+            {
+                "event_id": "missing-wording",
+                "source_release_s": 12.345,
+                "classification": "closure_absent",
+            },
+            1,
+            {"pre_s": 0.8, "post_s": 0.8, "mouth_roi": None},
+        )
+        self.assertEqual(
+            event.category_ja,
+            "可視フレーム内で明瞭な閉鎖を確認できず",
+        )
+        self.assertEqual(
+            MODULE.CAUSAL_LIMITATION,
+            "本資料は、録画内の音響開放時刻と可視的な口唇接触を並べた観測資料です。"
+            "A/V不整合の原因、発話者の本人性、国籍、所属、意図を判定するものではありません。",
+        )
+        self.assertEqual(
+            MODULE.NORMALIZATION_LIMITATION,
+            "ケース別正規化：絶対音圧比較不可",
+        )
+
+    def test_required_missing_finding_fits_the_primary_finding_panel(self) -> None:
+        event = MODULE.parse_event(
+            {
+                "event_id": "missing-finding-fit",
+                "source_release_s": 12.345,
+                "classification": "closure_absent",
+            },
+            1,
+            {"pre_s": 0.8, "post_s": 0.8, "mouth_roi": None},
+        )
+        fonts = MODULE.make_fonts()
+        text_draw = ImageDraw.Draw(Image.new("RGB", (1, 1), "black"))
+        bbox = text_draw.textbbox((0, 0), event.category_ja, font=fonts.finding)
+        self.assertLessEqual(bbox[2] - bbox[0], 1882 - 1424)
+
     def test_card_defaults_are_five_seconds(self) -> None:
         args = MODULE.build_parser().parse_args(
             ["--manifest", "m.json", "--output", "out.mp4"]
@@ -260,6 +299,10 @@ class ClosureEvidenceRendererTests(unittest.TestCase):
         self.assertEqual(
             payload["render"]["layout"]["mouth_inset_xyxy"],
             list(MODULE.MOUTH_INSET_XYXY),
+        )
+        self.assertEqual(
+            payload["render"]["waveform"]["comparison_limitation"],
+            MODULE.NORMALIZATION_LIMITATION,
         )
         self.assertEqual(
             payload["render"]["layout_reference"]["sha256"],

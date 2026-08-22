@@ -9,6 +9,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,13 @@ from layout_reference import (  # noqa: E402
     review_sheet_path,
     verify_layout_reference,
 )
-from render import render  # noqa: E402
+from render import (  # noqa: E402
+    DeltaGlyphGeometry,
+    PointGlyphGeometry,
+    _delta_coordinate,
+    _draw_delta_glyph,
+    render,
+)
 from verify import VerificationError, _contact_sheet_targets, verify  # noqa: E402
 from render_layout_preview import render_preview  # noqa: E402
 
@@ -145,6 +152,73 @@ class RenderingSmokeTests(unittest.TestCase):
             (1672, 941),
         )
         self.assertEqual(reference["production_canvas"], {"width": 1920, "height": 1080})
+
+    def test_single_value_group_draws_only_a_point(self) -> None:
+        color = (46, 160, 255)
+        image = Image.new("RGB", (128, 80), (0, 0, 0))
+        geometry = _draw_delta_glyph(
+            ImageDraw.Draw(image),
+            count=1,
+            low_x=24,
+            high_x=92,
+            median_x=58,
+            axis_y=36,
+            color=color,
+        )
+
+        self.assertIsInstance(geometry, PointGlyphGeometry)
+        self.assertEqual((geometry.x, geometry.y), (58, 36))
+        self.assertEqual(image.getpixel((58, 36)), color)
+        self.assertEqual(image.getpixel((24, 42)), (0, 0, 0))
+        self.assertEqual(image.getpixel((92, 42)), (0, 0, 0))
+        self.assertEqual(image.getpixel((58, 29)), (0, 0, 0))
+
+    def test_multi_value_collapsed_range_and_median_use_separate_primitives(self) -> None:
+        color = (46, 160, 255)
+        image = Image.new("RGB", (128, 80), (0, 0, 0))
+        geometry = _draw_delta_glyph(
+            ImageDraw.Draw(image),
+            count=2,
+            low_x=58,
+            high_x=58,
+            median_x=58,
+            axis_y=36,
+            color=color,
+        )
+
+        self.assertIsInstance(geometry, DeltaGlyphGeometry)
+        self.assertEqual((geometry.low_x, geometry.high_x, geometry.median_x), (58, 58, 58))
+        self.assertGreater(geometry.range_y, geometry.median_y)
+        self.assertGreater(geometry.range_y - max(y for _, y in geometry.diamond), 1)
+        self.assertEqual(image.getpixel((geometry.low_x, geometry.cap_bottom)), color)
+        self.assertEqual(image.getpixel((geometry.median_x, geometry.median_y)), color)
+
+    def test_multi_value_subpixel_range_preserves_truthful_x_coordinates(self) -> None:
+        color = (46, 160, 255)
+        x0, x1, magnitude = 10, 110, 1.0
+        low_x = _delta_coordinate(0.25, x0, x1, magnitude)
+        high_x = _delta_coordinate(0.2501, x0, x1, magnitude)
+        median_x = _delta_coordinate(0.25005, x0, x1, magnitude)
+        self.assertEqual(low_x, high_x, "fixture range must collapse below one pixel")
+
+        image = Image.new("RGB", (128, 80), (0, 0, 0))
+        geometry = _draw_delta_glyph(
+            ImageDraw.Draw(image),
+            count=3,
+            low_x=low_x,
+            high_x=high_x,
+            median_x=median_x,
+            axis_y=36,
+            color=color,
+        )
+
+        self.assertIsInstance(geometry, DeltaGlyphGeometry)
+        self.assertEqual(
+            (geometry.low_x, geometry.high_x, geometry.median_x),
+            (low_x, high_x, median_x),
+        )
+        self.assertEqual(image.getpixel((geometry.low_x, geometry.cap_bottom)), color)
+        self.assertEqual(image.getpixel((geometry.median_x, geometry.median_y)), color)
 
     def test_contact_sheet_targets_stay_inside_short_intro_and_outro(self) -> None:
         clips = [

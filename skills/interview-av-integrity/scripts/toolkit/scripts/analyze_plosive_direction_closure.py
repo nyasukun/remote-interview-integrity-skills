@@ -98,6 +98,39 @@ def _finite_float(value: object) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _normalized_blinded_event(
+    event: Mapping[str, object],
+    automated_selection: Mapping[str, object],
+) -> tuple[dict[str, object], str, float | None, object]:
+    """Accept both the legacy nested form and the review finalizer schema.
+
+    ``finalize_blinded_acoustic_review.py`` deliberately emits the reviewed
+    fields at the event top level. Older callers and fixtures used a nested
+    ``selection`` plus ``annotation_status``/``audio_release_time_s``. Keep
+    both forms readable so the documented command chain composes directly.
+    """
+
+    nested_selection = _nested(event, "selection")
+    if nested_selection:
+        selection = dict(nested_selection)
+    else:
+        selection = dict(automated_selection)
+        for key in ("speaker", "group", "epoch_id", "phoneme_class"):
+            if event.get(key) is not None:
+                selection[key] = event.get(key)
+
+    status = str(event.get("annotation_status") or event.get("status") or "")
+    audio_time = _finite_float(
+        event.get("audio_release_time_s")
+        if event.get("audio_release_time_s") is not None
+        else event.get("selected_release_time_s")
+    )
+    confidence = _nested(event, "annotation").get("confidence")
+    if confidence is None:
+        confidence = event.get("confidence")
+    return selection, status, audio_time, confidence
+
+
 def _json_ready(value: object) -> object:
     if isinstance(value, Mapping):
         return {str(key): _json_ready(item) for key, item in value.items()}
@@ -551,15 +584,15 @@ def build_records(
     records: list[dict[str, object]] = []
     exclusions: Counter[str] = Counter()
     for event_id, blinded_event in blind_index.items():
-        selection = _nested(blinded_event, "selection")
         automated_event = auto_index[event_id]
         automated_selection = _nested(automated_event, "selection")
+        selection, status, audio_time, confidence = _normalized_blinded_event(
+            blinded_event, automated_selection
+        )
         for key in ("speaker", "group", "epoch_id", "phoneme_class"):
             if selection.get(key) != automated_selection.get(key):
                 raise ValueError(f"selection.{key} mismatch for {event_id}")
-        audio_time = _finite_float(blinded_event.get("audio_release_time_s"))
         token_start = _finite_float(selection.get("token_start_s"))
-        status = str(blinded_event.get("annotation_status") or "")
         target = True
         reasons: list[str] = []
         if status != "measurable" or audio_time is None:
@@ -596,7 +629,7 @@ def build_records(
                 "selection": dict(selection),
                 "audio_release_time_s": audio_time,
                 "annotation_status": status,
-                "annotation_confidence": _nested(blinded_event, "annotation").get("confidence"),
+                "annotation_confidence": confidence,
                 "audio_measurable_in_scope": target,
                 "analysis_eligible": bool(target and geometry and geometry["face_valid"] is True),
                 "geometry": geometry,

@@ -68,8 +68,9 @@ DEFAULT_NOTE = "破裂音前後の口唇運動を比較"
 MISSING_LEGEND = "赤：閉鎖確認できず"
 REFERENCE_LEGEND = "緑：同期/閉鎖あり参照"
 LATE_CONTACT_LIMITATION = "後続音素の口形である可能性あり。"
+NORMALIZATION_LIMITATION = "ケース別正規化：絶対音圧比較不可"
 CAUSAL_LIMITATION = (
-    "本資料は、録画内の音響開放時刻と可視的な口唇接触を並べた視覚資料です。"
+    "本資料は、録画内の音響開放時刻と可視的な口唇接触を並べた観測資料です。"
     "A/V不整合の原因、発話者の本人性、国籍、所属、意図を判定するものではありません。"
 )
 
@@ -102,7 +103,7 @@ class EvidenceEvent:
     @property
     def category_ja(self) -> str:
         if self.category == "missing":
-            return "明瞭な閉鎖を確認できず"
+            return "可視フレーム内で明瞭な閉鎖を確認できず"
         if self.reference_kind == "sync":
             return "同期参照（閉鎖あり）"
         return "閉鎖あり参照"
@@ -135,6 +136,7 @@ class Manifest:
 class FontSet:
     title: ImageFont.FreeTypeFont | ImageFont.ImageFont
     header: ImageFont.FreeTypeFont | ImageFont.ImageFont
+    finding: ImageFont.FreeTypeFont | ImageFont.ImageFont
     body: ImageFont.FreeTypeFont | ImageFont.ImageFont
     small: ImageFont.FreeTypeFont | ImageFont.ImageFont
     tiny: ImageFont.FreeTypeFont | ImageFont.ImageFont
@@ -405,6 +407,7 @@ def make_fonts() -> FontSet:
     return FontSet(
         title=_font(38, path),
         header=_font(30, path),
+        finding=_font(23, path),
         body=_font(25, path),
         small=_font(20, path),
         tiny=_font(16, path),
@@ -634,6 +637,12 @@ def _draw_waveform(
     center_y = (top + bottom) // 2
     wave_height = (bottom - top) * 0.42
     draw.text((72, WAVEFORM_Y + 20), "音圧波形（正規化）", fill=WHITE, font=fonts.small)
+    draw.text(
+        (292, WAVEFORM_Y + 22),
+        NORMALIZATION_LIMITATION,
+        fill=MUTED,
+        font=fonts.tiny,
+    )
     draw.text((right - 290, WAVEFORM_Y + 21), "固定線＝音響開放（破裂点）", fill=MUTED, font=fonts.tiny)
     for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
         x = int(round(left + (right - left) * fraction))
@@ -849,7 +858,8 @@ def render_evidence_frame(
     _rgba_overlay(canvas, info_box, "#080c12", 225)
     draw = ImageDraw.Draw(canvas)
     draw.rounded_rectangle(info_box, radius=16, outline=event.color, width=3)
-    draw.text((1424, HEADER_HEIGHT + 386), event.category_ja, fill=event.color, font=fonts.header)
+    finding_font = fonts.finding if event.category == "missing" else fonts.header
+    draw.text((1424, HEADER_HEIGHT + 386), event.category_ja, fill=event.color, font=finding_font)
     display_label = _ellipsize_text(draw, event.label, fonts.body, 420)
     draw.text((1424, HEADER_HEIGHT + 438), display_label, fill=WHITE, font=fonts.body)
     note_lines = _wrap_text(draw, event.note, fonts.tiny, 425)
@@ -1271,6 +1281,7 @@ def write_effective_manifest(
                 "source": "mean of the two decoded source channels",
                 "feature": "per-horizontal-pixel RMS envelope",
                 "normalization": "each case divided by its 99th-percentile RMS; same rule for all cases",
+                "comparison_limitation": NORMALIZATION_LIMITATION,
                 "clip_range": [0.0, 1.0],
                 "release_marker": "fixed manifest source_release_s; not peak-picked for display",
             },

@@ -61,6 +61,12 @@ class ApprovedSyntheticPng:
     height: int
 
 
+@dataclass(frozen=True)
+class ApprovedSyntheticMp4:
+    sha256: str
+    size_bytes: int
+
+
 APPROVED_SYNTHETIC_PNGS = {
     PurePosixPath(
         "skills/interview-av-integrity/assets/layout-references/"
@@ -81,6 +87,28 @@ APPROVED_SYNTHETIC_PNGS = {
 }
 
 
+APPROVED_SYNTHETIC_MP4S = {
+    PurePosixPath(
+        "examples/synthetic-interview/deterministic_synthetic_interview_blind.mp4"
+    ): ApprovedSyntheticMp4(
+        sha256="579bc0197f8bb03c0dc1d4250437d2fb7a77c074ec3829d7374718fe2055729c",
+        size_bytes=27549459,
+    ),
+    PurePosixPath(
+        "examples/synthetic-interview/closure_evidence_video.mp4"
+    ): ApprovedSyntheticMp4(
+        sha256="5275178ca4dd408b055f4ee9842d2149febbca495ce59d85acee42127173de86",
+        size_bytes=21625946,
+    ),
+    PurePosixPath(
+        "examples/synthetic-interview/voice_signal_comparison.mp4"
+    ): ApprovedSyntheticMp4(
+        sha256="2fd5b3305947bc043e214ce6c2b6f8dc0bb7ca543e6a2d1a8a3fc761a580f3f4",
+        size_bytes=1337296,
+    ),
+}
+
+
 @dataclass(frozen=True)
 class RepositoryEntry:
     relative: PurePosixPath
@@ -92,6 +120,13 @@ class RepositoryEntry:
 
 class AuditInputError(RuntimeError):
     """Raised when the repository or index cannot be inspected safely."""
+
+
+def _should_load_data(relative: PurePosixPath, size: int) -> bool:
+    approved_mp4 = APPROVED_SYNTHETIC_MP4S.get(relative)
+    return size <= MAX_FILE_SIZE or (
+        approved_mp4 is not None and size == approved_mp4.size_bytes
+    )
 
 
 def _git_bytes(root: Path, *args: str) -> bytes:
@@ -143,12 +178,13 @@ def _staged_entry(root: Path, name: str) -> RepositoryEntry:
     except ValueError as exc:
         raise AuditInputError(f"Cannot determine the staged object size: {name}") from exc
 
+    relative = PurePosixPath(name)
     data = None
-    if mode in REGULAR_GIT_MODES and size <= MAX_FILE_SIZE:
+    if mode in REGULAR_GIT_MODES and _should_load_data(relative, size):
         data = _git_bytes(root, "cat-file", "blob", object_id)
         if len(data) != size:
             raise AuditInputError(f"Staged object size changed during audit: {name}")
-    return RepositoryEntry(PurePosixPath(name), mode, size, data)
+    return RepositoryEntry(relative, mode, size, data)
 
 
 def _working_tree_entries(root: Path) -> list[RepositoryEntry]:
@@ -180,7 +216,7 @@ def _working_tree_entries(root: Path) -> list[RepositoryEntry]:
             entries.append(RepositoryEntry(relative, "unsupported", metadata.st_size, None))
             continue
         mode = "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
-        if metadata.st_size > MAX_FILE_SIZE:
+        if not _should_load_data(relative, metadata.st_size):
             entries.append(RepositoryEntry(relative, mode, metadata.st_size, None))
             continue
         try:
@@ -243,6 +279,37 @@ def _audit_approved_png(
     return findings
 
 
+def _audit_approved_mp4(
+    entry: RepositoryEntry,
+    approved: ApprovedSyntheticMp4,
+) -> list[str]:
+    relative = entry.relative
+    findings: list[str] = []
+    if entry.mode != "100644":
+        findings.append(
+            f"approved MP4 mode mismatch: {relative} (expected 100644)"
+        )
+    if entry.size != approved.size_bytes:
+        findings.append(
+            "approved MP4 size mismatch: "
+            f"{relative} (expected {approved.size_bytes}, got {entry.size})"
+        )
+    if entry.data is None:
+        findings.append(f"approved MP4 cannot be validated: {relative}")
+        return findings
+    if len(entry.data) != approved.size_bytes:
+        findings.append(
+            "approved MP4 data length mismatch: "
+            f"{relative} (expected {approved.size_bytes}, got {len(entry.data)})"
+        )
+    if len(entry.data) < 8 or entry.data[4:8] != b"ftyp":
+        findings.append(f"approved MP4 structure is invalid: {relative}")
+    digest = hashlib.sha256(entry.data).hexdigest()
+    if digest != approved.sha256:
+        findings.append(f"approved MP4 SHA-256 mismatch: {relative}")
+    return findings
+
+
 def audit_entries(entries: list[RepositoryEntry]) -> list[str]:
     findings: list[str] = []
     for entry in entries:
@@ -266,6 +333,12 @@ def audit_entries(entries: list[RepositoryEntry]) -> list[str]:
             findings.append(f"forbidden filename: {relative}")
         if lowered_parts & FORBIDDEN_PARTS:
             findings.append(f"private/generated directory: {relative}")
+
+        approved_mp4 = APPROVED_SYNTHETIC_MP4S.get(relative)
+        if approved_mp4 is not None:
+            findings.extend(_audit_approved_mp4(entry, approved_mp4))
+            continue
+
         if entry.size > MAX_FILE_SIZE:
             findings.append(f"file larger than 5 MiB: {relative}")
 

@@ -108,3 +108,10 @@ dist/
 .vscode/
 *.swp
 *~
+
+# Reviewed fully synthetic end-to-end examples. Keep every other video ignored.
+!/examples/
+!/examples/synthetic-interview/
+!/examples/synthetic-interview/deterministic_synthetic_interview_blind.mp4
+!/examples/synthetic-interview/closure_evidence_video.mp4
+!/examples/synthetic-interview/voice_signal_comparison.mp4

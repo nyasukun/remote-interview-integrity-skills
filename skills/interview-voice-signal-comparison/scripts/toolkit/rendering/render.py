@@ -65,6 +65,25 @@ class ClipData:
     output_end_sample: int = 0
 
 
+@dataclass(frozen=True)
+class DeltaGlyphGeometry:
+    low_x: int
+    high_x: int
+    median_x: int
+    range_y: int
+    median_y: int
+    cap_top: int
+    cap_bottom: int
+    diamond: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class PointGlyphGeometry:
+    x: int
+    y: int
+    radius: int
+
+
 def _canonical_sha256(value: Any) -> str:
     encoded = json.dumps(json_ready(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -170,6 +189,95 @@ def _panel(image: Image.Image, data: ClipData, group: GroupSpec, bounds: tuple[i
         draw.line((x, spectrum_box[1], x, spectrum_box[3]), fill=group.color_rgb, width=3)
 
 
+def _delta_coordinate(value: float, x0: int, x1: int, magnitude: float) -> int:
+    return x0 + int(np.clip((value + magnitude) / (2 * magnitude), 0.0, 1.0) * (x1 - x0))
+
+
+def _draw_range_median_glyph(
+    draw: ImageDraw.ImageDraw,
+    *,
+    low_x: int,
+    high_x: int,
+    median_x: int,
+    axis_y: int,
+    color: tuple[int, int, int],
+) -> DeltaGlyphGeometry:
+    """Draw truthful x positions while separating range and median vertically.
+
+    A range can legitimately collapse below one output pixel. End caps keep that
+    collapsed range visible, while the median diamond is placed on a separate
+    row and connected with a stem. No minimum x-width is imposed, so the shared
+    numeric axis remains authoritative.
+    """
+    range_y = axis_y + 6
+    median_y = axis_y - 7
+    cap_top, cap_bottom = range_y - 5, range_y + 5
+    diamond = (
+        (median_x, median_y - 5),
+        (median_x + 5, median_y),
+        (median_x, median_y + 5),
+        (median_x - 5, median_y),
+    )
+    draw.line((low_x, range_y, high_x, range_y), fill=color, width=3)
+    draw.line((low_x, cap_top, low_x, cap_bottom), fill=color, width=2)
+    draw.line((high_x, cap_top, high_x, cap_bottom), fill=color, width=2)
+    draw.line((median_x, median_y + 5, median_x, range_y), fill=color, width=2)
+    draw.polygon(diamond, fill=color, outline=TEXT)
+    return DeltaGlyphGeometry(
+        low_x=low_x,
+        high_x=high_x,
+        median_x=median_x,
+        range_y=range_y,
+        median_y=median_y,
+        cap_top=cap_top,
+        cap_bottom=cap_bottom,
+        diamond=diamond,
+    )
+
+
+def _draw_point_glyph(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    axis_y: int,
+    color: tuple[int, int, int],
+) -> PointGlyphGeometry:
+    """Draw one group/metric observation as a point at its truthful x position."""
+    radius = 5
+    draw.ellipse(
+        (x - radius, axis_y - radius, x + radius, axis_y + radius),
+        fill=color,
+        outline=TEXT,
+        width=1,
+    )
+    return PointGlyphGeometry(x=x, y=axis_y, radius=radius)
+
+
+def _draw_delta_glyph(
+    draw: ImageDraw.ImageDraw,
+    *,
+    count: int,
+    low_x: int,
+    high_x: int,
+    median_x: int,
+    axis_y: int,
+    color: tuple[int, int, int],
+) -> PointGlyphGeometry | DeltaGlyphGeometry:
+    """Dispatch to the analysis-contract glyph without changing x coordinates."""
+    if count < 1:
+        raise ValueError("delta glyph count must be positive")
+    if count == 1:
+        return _draw_point_glyph(draw, x=median_x, axis_y=axis_y, color=color)
+    return _draw_range_median_glyph(
+        draw,
+        low_x=low_x,
+        high_x=high_x,
+        median_x=median_x,
+        axis_y=axis_y,
+        color=color,
+    )
+
+
 def _delta_chart(image: Image.Image, bounds: tuple[int, int, int, int], title: str, spec: RenderSpec, summary: dict[str, Any], columns: list[tuple[str, str, float, str]], note: str) -> None:
     draw = ImageDraw.Draw(image)
     left, top, right, bottom = bounds
@@ -183,29 +291,52 @@ def _delta_chart(image: Image.Image, bounds: tuple[int, int, int, int], title: s
         draw.ellipse((legend_x, top + 43, legend_x + 7, top + 50), fill=group.color_rgb)
         draw.text((legend_x + 10, top + 39), group.short_label, font=font(11, True), fill=group.color_rgb)
         legend_x += max(62, len(group.short_label) * 10 + 24)
+    glyph_color = comparison[0].color_rgb if comparison else MUTED
+    glyph_y = top + 62
+    draw.ellipse((left + 18, glyph_y - 4, left + 26, glyph_y + 4), fill=glyph_color, outline=TEXT)
+    draw.text((left + 32, top + 53), "point (n=1)", font=font(9), fill=MUTED)
+    draw.line((left + 108, glyph_y, left + 134, glyph_y), fill=glyph_color, width=2)
+    draw.line((left + 108, glyph_y - 4, left + 108, glyph_y + 4), fill=glyph_color, width=2)
+    draw.line((left + 134, glyph_y - 4, left + 134, glyph_y + 4), fill=glyph_color, width=2)
+    draw.text((left + 140, top + 53), "min–max (n>1)", font=font(9), fill=MUTED)
+    diamond_x = left + 224
+    draw.polygon(
+        ((diamond_x, glyph_y - 4), (diamond_x + 4, glyph_y), (diamond_x, glyph_y + 4), (diamond_x - 4, glyph_y)),
+        fill=glyph_color,
+        outline=TEXT,
+    )
+    draw.text((left + 233, top + 53), "median (n>1)", font=font(9), fill=MUTED)
     width = (right - left - 24) / len(columns)
     for column, (label, key, magnitude, fmt) in enumerate(columns):
         x0 = int(left + 16 + column * width)
         x1 = int(left + 8 + (column + 1) * width)
-        draw.text(((x0 + x1) / 2, top + 66), label, anchor="ma", font=font(12, True), fill=TEXT)
+        draw.text(((x0 + x1) / 2, top + 79), label, anchor="ma", font=font(12, True), fill=TEXT)
         zero = (x0 + x1) // 2
-        draw.line((zero, top + 83, zero, top + 181), fill=designated.color_rgb, width=3)
-
-        def coordinate(value: float) -> int:
-            return x0 + int(np.clip((value + magnitude) / (2 * magnitude), 0.0, 1.0) * (x1 - x0))
+        draw.line((zero, top + 96, zero, top + 190), fill=designated.color_rgb, width=3)
 
         for row_index, group in enumerate(comparison):
-            y = top + 99 + row_index * 28
-            draw.line((x0, y, x1, y), fill=(45, 58, 68))
-            row = summary["metrics"][key]["signed_deltas_to_designated"][group.group_id]
+            axis_y = top + 116 + row_index * 28
+            draw.line((x0, axis_y, x1, axis_y), fill=(45, 58, 68))
+            metric = summary["metrics"][key]
+            row = metric["signed_deltas_to_designated"][group.group_id]
             if None in (row["min"], row["max"], row["median"]):
                 continue
-            low, high, median = coordinate(row["min"]), coordinate(row["max"]), coordinate(row["median"])
-            draw.line((low, y, high, y), fill=group.color_rgb, width=7)
-            draw.ellipse((median - 5, y - 5, median + 5, y + 5), fill=group.color_rgb, outline=TEXT)
-        draw.text((x0, top + 191), format(-magnitude, fmt), font=font(10), fill=MUTED)
-        draw.text((zero, top + 191), "0", anchor="ma", font=font(10, True), fill=designated.color_rgb)
-        draw.text((x1, top + 191), format(magnitude, fmt), anchor="ra", font=font(10), fill=MUTED)
+            count = int(metric["groups"][group.group_id]["count"])
+            low = _delta_coordinate(row["min"], x0, x1, magnitude)
+            high = _delta_coordinate(row["max"], x0, x1, magnitude)
+            median = _delta_coordinate(row["median"], x0, x1, magnitude)
+            _draw_delta_glyph(
+                draw,
+                count=count,
+                low_x=low,
+                high_x=high,
+                median_x=median,
+                axis_y=axis_y,
+                color=group.color_rgb,
+            )
+        draw.text((x0, top + 200), format(-magnitude, fmt), font=font(10), fill=MUTED)
+        draw.text((zero, top + 200), "0", anchor="ma", font=font(10, True), fill=designated.color_rgb)
+        draw.text((x1, top + 200), format(magnitude, fmt), anchor="ra", font=font(10), fill=MUTED)
     draw.text((left + 16, bottom - 23), note, font=font(11), fill=MUTED)
 
 

@@ -257,6 +257,53 @@ class DirectionClosureTests(unittest.TestCase):
             self.assertFalse(late["analysis_eligible"])
             self.assertIn("token_at_or_after_cutoff", late["exclusion_reasons"])
 
+    def test_build_records_accepts_acoustic_review_finalizer_schema(self) -> None:
+        selected = {
+            "event_id": "p-finalized",
+            "speaker": "candidate",
+            "group": "candidate",
+            "epoch_id": "candidate-e1",
+            "phoneme_class": "p",
+            "token_start_s": 10.0,
+        }
+        blinded = {
+            "events": [
+                {
+                    "runner_event_id": "p-finalized",
+                    "status": "measurable",
+                    "selected_release_time_s": 10.0,
+                    "confidence": "high",
+                    "speaker": "candidate",
+                    "group": "candidate",
+                    "epoch_id": "candidate-e1",
+                    "phoneme_class": "p",
+                }
+            ]
+        }
+        automated = {
+            "events": [
+                {
+                    "selection": selected,
+                    "lip_samples": sequence(
+                        10.0, {-2: "contact", -1: "contact"}
+                    ),
+                }
+            ]
+        }
+
+        records, audit = MODULE.build_records(
+            blinded,
+            automated,
+            fps=24.0,
+            config=self.config,
+        )
+
+        self.assertEqual(audit["audio_measurable_in_scope_count"], 1)
+        self.assertEqual(records[0]["annotation_status"], "measurable")
+        self.assertEqual(records[0]["audio_release_time_s"], 10.0)
+        self.assertEqual(records[0]["annotation_confidence"], "high")
+        self.assertEqual(records[0]["selection"], selected)
+
     def test_geometry_protocol_controls_windows_and_direction_margin(self) -> None:
         protocol = MODULE.DirectionClosureProtocol(
             fps=30.0,
