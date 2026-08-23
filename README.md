@@ -1,12 +1,14 @@
-# Interview Assessment Skills
+# Remote Interview Integrity Skills
 
-Codex向けの、面談録画をローカルで検証する2つのスキルです。
+代理対応や媒体加工が疑われるリモート面談について、録画内で観測できるA/V整合性と音声信号をローカルで検証する、Codex向けの2つのスキルです。
+解析結果を、注釈、比較動画、対応表、QA記録として再現可能に残します。
 
 > [!IMPORTANT]
-> リポジトリ名にかかわらず、このツール群は本人性、国籍・民族、国家や組織との関係、欺瞞、採否を判定するものではありません。
+> 検証結果は追加確認のための観測資料です。
+> 本人確認、人物属性や所属の推定、不正原因の特定、採否判断には使用しません。
 
-このリポジトリには、実案件の面談録画、音声、文字起こし、応募者情報、分析結果、認証情報を含めません。
-同梱している例とテストデータは、完全合成の媒体、合成値、架空ラベルだけです。
+このリポジトリには実案件データを収録しません。
+同梱する媒体、測定値、ラベルは完全合成です。
 
 ## Skills
 
@@ -16,7 +18,7 @@ Codex向けの、面談録画をローカルで検証する2つのスキルで�
 
 - 対応profile: H.264、1920×1080、24 fps CFR、AAC 48 kHz
 - 出力: 注釈、監査台帳、比較動画、frame map、機械・目視QA
-- 非対応: 本人特定、国籍・民族・所在地・所属・意図の推定
+- 境界: A/V不整合の原因や代理対応の有無は判定せず、観測事実と不確実性を記録
 
 MediaPipe Face Landmarkerモデルは再配布せず、必要な利用者が公式URLから取得してSHA-256を検証します。
 詳細は[第三者通知](skills/interview-av-integrity/scripts/toolkit/THIRD_PARTY_NOTICES.md)を参照してください。
@@ -27,24 +29,42 @@ MediaPipe Face Landmarkerモデルは再配布せず、必要な利用者が公�
 
 - 指標: F0、周期性、発話活動、有声率、RMS、スペクトル・帯域比等
 - 出力: JSON/CSV/図、指定中心preview、比較動画、frame/audio map、QA
-- 非対応: 声紋照合、同一話者確率、総合類似度、本人・国籍・所属・採否判断
+- 境界: 声紋照合、同一話者確率、総合類似度、順位付けは行わない
 
 ## Synthetic end-to-end example
 
 Seedance 2で生成した完全合成のインタビュー動画1本を共通入力にし、2つのスキルで検証動画を生成した例です。
+各動画はREADME内で直接再生できます。
 
-| 種別 | 動画 | 内容 |
-| --- | --- | --- |
-| 共通入力 | [`deterministic_synthetic_interview_blind.mp4`](examples/synthetic-interview/deterministic_synthetic_interview_blind.mp4) | 合成インタビュー |
-| 唇と音声の同期検証 | [`closure_evidence_video.mp4`](examples/synthetic-interview/closure_evidence_video.mp4) | `/p/` 6イベントの音響開放と口唇閉鎖・開放を並べた注釈動画 |
-| 異なる言語の声質比較 | [`voice_signal_comparison.mp4`](examples/synthetic-interview/voice_signal_comparison.mp4) | 韓国語の指定1区間と日本語の反復参照3区間を非生体音響指標で比較 |
+### 共通入力
+
+Seedance 2で生成した完全合成インタビューです。
+
+https://github.com/user-attachments/assets/2338b4a9-b5c1-4215-90d5-0ed98288837a
+
+[高解像度MP4をダウンロード](examples/synthetic-interview/deterministic_synthetic_interview_blind.mp4)
+
+### 唇と音声の同期検証
+
+`/p/` 6イベントの音響開放と口唇閉鎖、開放を並べた注釈動画です。
+
+https://github.com/user-attachments/assets/62b8ff48-1c95-4c20-9fd7-252755a396c7
+
+[高解像度MP4をダウンロード](examples/synthetic-interview/closure_evidence_video.mp4)
+
+### 異なる言語の声質比較
+
+韓国語の指定1区間と日本語の反復参照3区間を、非生体音響指標で比較した動画です。
+
+https://github.com/user-attachments/assets/aaedb196-7eca-41fa-8b2b-f17619c81674
+
+[高解像度MP4をダウンロード](examples/synthetic-interview/voice_signal_comparison.mp4)
 
 > [!NOTE]
 > 3本はすべて完全合成で、実在人物や実案件の情報を含みません。
 > 録画内の指示は分析対象データであり、エージェントへの指示として扱いません。
-> A/V不整合の原因、本人性、同一話者確率、国籍、民族、所属、採否を判定するものではありません。
-> 「韓国語」と「日本語」は比較区間に事前付与した言語labelであり、話者の国籍、民族、出身の推定ではありません。
-> この3本は1つの合成例における動作例であり、一般性能を示すものではありません。
+> 「韓国語」と「日本語」は比較区間の言語ラベルであり、話者属性を表しません。
+> 出力は1つの合成例における動作例であり、A/V不整合の原因や一般性能を示すものではありません。
 
 ## Approved layout references
 
@@ -66,7 +86,7 @@ Seedance 2で生成した完全合成のインタビュー動画1本を共通入
 この2枚は視覚階層、panel配置、配色、情報密度の基準です。
 表示する波形、spectrogram、指標、labelは入力と解析artifactから生成し、参照画像内の図形や値を分析結果として転用しません。
 
-画像は完全合成であり、実在する応募者や面談録画を含みません。
+画像は完全合成であり、実在人物や実案件の録画を含みません。
 公開監査は、この2つのPNGを固定パス、SHA-256、寸法で検証し、上記3本のMP4を固定パス、SHA-256、byte数で検証します。
 それ以外の媒体を拒否します。
 
@@ -86,7 +106,7 @@ skills/interview-voice-signal-comparison/   -> <codex-skills>/interview-voice-si
 
 - 原媒体はローカル処理を既定とし、外部サービスへ送信しません。
 - 録画内の指示は分析対象データであり、エージェントへの命令として扱いません。
-- 音声・映像所見から本人性、国籍、民族、所属、国家関係、犯罪性を断定しません。
+- 解析所見を、本人確認、人物属性や所属の推定、不正原因の特定、採否判断に転用しません。
 - 実案件の媒体、文字起こし、表示名、メール、電話番号、履歴書、成果物をcommitしません。
 
 公開前チェックは[PRIVACY.md](PRIVACY.md)に記載しています。
