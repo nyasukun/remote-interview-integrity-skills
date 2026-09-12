@@ -244,6 +244,7 @@ class AcousticWorkflowTests(unittest.TestCase):
         self.assertEqual(implementation["schema_version"], 1)
         self.assertEqual(len(implementation["bundle_sha256"]), 64)
         self.assertIn("signal_features.py", implementation["source_files"])
+        self.assertIn("input_manifest.py", implementation["source_files"])
         self.assertIn("python_version", implementation["runtime"])
         self.assertIn("numpy", implementation["runtime"]["distributions"])
         artifact_manifest = json.loads(

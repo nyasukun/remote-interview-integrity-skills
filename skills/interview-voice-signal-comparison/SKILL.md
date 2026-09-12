@@ -1,6 +1,6 @@
 ---
 name: interview-voice-signal-comparison
-description: 面談録画のユーザー指定音声区間を基準に、候補者や面談者の参照区間を非生体の音響特徴で比較し、指定中心の注釈付き動画と再現可能なQA成果物を作る。声質比較、指定音声を軸にした複数話者比較、F0・周期性・帯域比等の比較動画で使用する。文字起こしだけ、一般動画編集、口唇同期、声紋照合、本人特定、同一話者確率、人物属性・所属の推定、採否判断には使用しない。
+description: 面談録画の指定音声1区間を基準に、参照群のF0・周期性・帯域比等を記述的に比較し、指定中心の動画と再現可能なQA成果物を作る。声質・複数区間の比較依頼で使用する。文字起こしだけ、一般動画編集、口唇同期、声紋照合、本人・同一話者確率・人物属性・所属の推定、採否判断には使用しない。
 ---
 
 # Interview Voice Signal Comparison
@@ -20,27 +20,36 @@ description: 面談録画のユーザー指定音声区間を基準に、候補�
 ユーザーが「3者のうち誰に近いか」を求めても、指標別の近接関係として扱う。
 総合的な本人照合を求められた場合は停止し、制御された再面談や適法な本人確認を案内する。
 
-## 作業モード
+## 作業範囲と参照先
 
-- 数値比較だけなら、区間manifest、特徴抽出、指定中心のJSON/CSV、方法ノートまで作る。
-- 比較動画まで作るなら、承認済み構図基準、production rendererの静止preview、そのpreviewの承認記録、MP4、frame map、audio map、effective manifest、機械QA、目視QAを作る。
-- 区間選定が必要なら、[selection-protocol.md](references/selection-protocol.md)を先に読む。
-- full pipelineでは、[manifest-schema.md](references/manifest-schema.md)、[analysis-and-reporting.md](references/analysis-and-reporting.md)、[video-and-qa.md](references/video-and-qa.md)、[toolkit-commands.md](references/toolkit-commands.md)を読む。
+数値比較だけなら区間manifest、特徴抽出、指定中心JSON/CSV、方法ノートまで作る。動画の参照と承認工程は、動画制作を依頼された場合に読む。
 
-## 必須ワークフロー
+| 作業 | 読む参照 |
+| --- | --- |
+| 区間選定・ラベル根拠の確認 | [selection-protocol.md](references/selection-protocol.md) |
+| 数値分析・報告 | [analysis-and-reporting.md](references/analysis-and-reporting.md) |
+| 入力・出力フィールドの固定 | [manifest-schema.md](references/manifest-schema.md)の該当schema |
+| 比較動画・preview承認・QA | [video-and-qa.md](references/video-and-qa.md) |
+| 環境準備・実行 | [toolkit-commands.md](references/toolkit-commands.md)の該当工程 |
+
+## 数値比較の必須手順
 
 1. 原本を上書きせず、絶対パス、SHA-256、容量、音声codec、sample rate、channel、time base、PTS coverageを記録する。
 2. 解析前に、指定群が1区間、比較群が1〜3群、各比較群が1区間以上であることをmanifestで固定する。
 3. 区間境界、話者ラベルの根拠、重なり発話、無音、音声coverageを検査する。不明なラベルを声から補完しない。
 4. 同じfeature configで全clipを抽出し、clip単位の値と群ごとのmin/max/medianを保存する。単一clip群はpointとして表示する。
 5. 指定値をゼロ基準にした指標別の符号付き差、各群rangeへの包含、必要なら指標別の最近medianを計算する。総合集約はしない。
-6. 本動画の前に、`assets/layout-references/voice-signal-designated-comparison-approved.png`を最初にviewし、固定SHA-256・1672×941 RGBを検証する。これはユーザー提供のsynthetic layout referenceであり証拠ではない。構図・情報密度・視覚品質だけを基準とし、人物、文字、言語名、値、波形、密度曲線、同時再生表示、1672×941 canvasは正本にしない。
-7. 新しいimagegenレイアウト案は作らない。実録画を外部送信せず、同梱のproduction renderer pathで1920×1080のsynthetic previewと、基準画像を左・previewを右に置いたside-by-side review sheetを作る。review sheet上で指定anchor固定、共有軸、range/median、逐次再生、限定文等の品質checkを完了した後にだけユーザーへ承認を求める。明示承認前に本動画をrenderしない。
-8. 動画では指定clipを固定anchor panelに置き、参照clipを順番に再生する。下段は指定値を固定ゼロ線とし、同じdomainで各群rangeとmedianを表示する。
-9. 全frameへ「観測できる違いを表示。本人性は判定しない。」を表示する。intro/outroにも原因・本人性を判定しない限定文を入れる。
-10. effective manifestの`anchor_group`、表示anchor、差分定義が同じ指定群を指すことを検証する。旧schemaの曖昧なanchor fieldを残さない。基準asset/manifestのhash・寸法、承認済みpreview、side-by-side review sheet、そのprovenanceのhashも保存する。
-11. MP4を全編decodeし、frame/audio map、A/V終端、全clipの音声保全、layout provenance、表示制約をfail-closedで検証する。QAがFAILなら完成扱いにしない。
-12. 報告では観測、指標別比較、限界、次の確認を分ける。「多数の指標で近い」を本人性へ読み替えない。
+6. 報告では観測、指標別比較、限界、次の確認を分ける。「多数の指標で近い」を本人性へ読み替えない。
+
+## 比較動画を作る場合
+
+[video-and-qa.md](references/video-and-qa.md)の構図基準・preview・QA手順に従う。
+最初に同梱のsynthetic layout referenceを開き、実録画を使わない本番renderer由来の1920×1080 previewとside-by-side review sheetを作る。新しいImageGen案から始めない。
+品質check後のpreviewに対するユーザーの明示承認を `layout_review` に固定し、検証がPASSするまで本動画をrenderしない。
+
+指定clipを左の固定anchorにし、参照clipを順番に再生する。下段は指定値をゼロとする共有domainで群rangeとmedianを表示する。
+全frameに「観測できる違いを表示。本人性は判定しない。」を表示し、intro/outroにも原因・本人性を判定しない限定文を入れる。
+anchor・差分定義の一致、layout provenance、MP4全編decode、frame/audio map、A/V終端、音声保全、表示制約をfail-closedで検証する。QAがFAILなら完成扱いにしない。
 
 ## 停止条件
 
@@ -51,8 +60,8 @@ description: 面談録画のユーザー指定音声区間を基準に、候補�
 - ユーザーが声質比較だけから本人、国籍、所属、詐欺、採否を断定するよう求める。
 - 総合speaker similarity、voiceprint、embedding、本人一致確率の生成が必要になる。
 - 外部サービスへ原媒体を送る必要があるが、明示承認がない。
-- 承認済みlayout referenceのpath、SHA-256、byte数、format、mode、寸法がallowlistと一致しない。
-- production renderer previewを基準画像と比較していない、品質checkが未完、またはユーザーの明示承認記録がない。
+- 動画制作時に、承認済みlayout referenceのpath、SHA-256、byte数、format、mode、寸法がallowlistと一致しない。
+- 動画制作時に、production renderer previewを基準画像と比較していない、品質checkが未完、またはユーザーの明示承認記録がない。
 
 停止時も、測定不能理由と、同一文の読み上げ・同一端末条件を用いた制御録音等の追加確認方法を報告する。
 
@@ -61,9 +70,8 @@ description: 面談録画のユーザー指定音声区間を基準に、候補�
 - input manifestと原本fingerprint
 - clip/group feature JSON・CSV・図
 - 指定中心comparison JSON・CSV・方法ノート
-- layout preview
-- layout reference manifest、preview、side-by-side review sheet、preview provenance、layout approval record
-- annotated MP4、effective manifest、frame map、audio map
-- 機械QA、目視QA、全成果物SHA-256
+- 検証結果と全成果物SHA-256
+
+動画を依頼された場合は、layout reference manifest、preview、side-by-side review sheet、preview provenance、承認記録、annotated MP4、effective manifest、frame map、audio map、機械QA、目視・聴取QAを追加する。
 
 納品時は「この比較は音響信号の記述であり、話者の本人性を判定しない」と明記する。

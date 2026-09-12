@@ -508,6 +508,15 @@ class BlindedCompletenessTests(unittest.TestCase):
                 "primary",
             )
 
+    def test_empty_csv_tables_are_header_only_and_config_is_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "epoch_estimates.csv"
+            MODULE._write_csv(target, [])
+            self.assertEqual(target.read_bytes(), b"\r\n")
+        self.assertEqual(
+            MODULE.visual_config_from_automated(self.automated), self.visual_config
+        )
+
     def test_loader_accepts_annotations_alias(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "annotations.json"

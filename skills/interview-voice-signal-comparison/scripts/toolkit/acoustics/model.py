@@ -26,6 +26,7 @@ BOUNDARY_TEXT = (
 IMPLEMENTATION_FILES = (
     "designated_centered.py",
     "extract_acoustic_features.py",
+    "input_manifest.py",
     "model.py",
     "run_analysis.py",
     "signal_features.py",

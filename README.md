@@ -114,10 +114,24 @@ skills/interview-voice-signal-comparison/   -> <codex-skills>/interview-voice-si
 
 ## Validation
 
-各スキルをCodexの`skill-creator`に含まれる`quick_validate.py`で検証し、各toolkitのunit testsを実行してください。
+両toolkitを検証する場合はPython 3.11〜3.12を使用し、仮想環境はリポジトリの外に作成してください。
+有効化した環境へ両toolkitの依存パッケージを入れると、1つのコマンドで全テストとworking treeの公開監査を実行できます。
+
+```bash
+python -m pip install \
+  -r skills/interview-av-integrity/scripts/toolkit/requirements.txt \
+  -r skills/interview-voice-signal-comparison/scripts/requirements.txt
+python scripts/validate_repository.py
+```
+
+テストは公開監査、A/V解析、音響解析、動画描画の4つに分け、それぞれ別のPythonプロセスで実行します。
+同名モジュールの干渉を防ぎ、キャッシュと合成テスト出力はリポジトリ外へ置きます。
+対象を絞る場合は`--suite av`のように指定します（`audit`、`av`、`acoustics`、`rendering`から選択、複数指定可）。
+公開監査は対象を絞った場合も実行し、テストまたは監査に失敗すると終了コード1を返します。
+
+スキルの文書を変更した場合は、Codexの`skill-creator`に含まれる`quick_validate.py`でも各スキルを検証してください。
 環境依存のMediaPipe preflightは、案件媒体を読む前に合成フレームだけで実行します。
-公開前に`python3 scripts/audit_public_release.py`でworking tree全体を検査してください。
-続けて`python3 scripts/audit_public_release.py --staged`を実行し、Git indexへstageしたbyte列とmodeを検査してください。
+commit前には`python scripts/audit_public_release.py --staged`も実行し、Git indexへstageしたbyte列とmodeを検査してください。
 
 ## Licensing
 

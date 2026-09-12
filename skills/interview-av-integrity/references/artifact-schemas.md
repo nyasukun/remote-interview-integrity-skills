@@ -64,6 +64,49 @@
 `classification` は `closure_absent`、`contact_reference`、`sync_reference` のいずれか。
 参照が事前の同期基準を満たす場合だけ `sync_reference`とし、それ以外の可視接触例は `contact_reference`として「閉鎖あり参照」と表現する。
 
+### layout_review
+
+preview生成時には省略し、[layout-quality-gate.md](layout-quality-gate.md)の品質確認と明示承認後にだけ固定する。
+
+承認後、event manifestのトップレベルへ次を追加する。pathはevent manifest基準の相対pathまたは絶対path、hashは実値を使う。
+
+```json
+{
+  "layout_review": {
+    "status": "APPROVED",
+    "approval_basis": "user explicitly approved the displayed production-path preview",
+    "preview": {
+      "path": "layout_implementation_preview.png",
+      "sha256": "<actual preview sha256>"
+    },
+    "preview_provenance": {
+      "path": "layout_preview_provenance.json",
+      "sha256": "<actual provenance sha256>"
+    },
+    "review_sheet": {
+      "path": "layout_review_sheet.png",
+      "sha256": "<actual review-sheet sha256>"
+    },
+    "quality_checks": {
+      "reference_viewed_first": true,
+      "visual_hierarchy_and_density_match": true,
+      "case_finding_speed_and_legend_readable": true,
+      "source_panel_remains_dominant": true,
+      "mouth_roi_and_same_frame_inset_traceable": true,
+      "mouth_crop_contains_lips_and_jaw": true,
+      "closure_window_and_burst_emphasis_readable": true,
+      "release_marker_and_playhead_readable": true,
+      "japanese_text_readable_at_1920x1080": true,
+      "limitations_and_uncertainty_readable": true,
+      "production_renderer_preview": true,
+      "side_by_side_review_completed": true
+    }
+  }
+}
+```
+
+layout reference、manifest basis、renderer source、preview、provenance、review sheet、approval status、checkのいずれかが不一致・未完了なら、full-render CLIは案件媒体を読む前にFAILする。
+
 ## render artifacts
 
 - `closure_evidence_video.mp4`

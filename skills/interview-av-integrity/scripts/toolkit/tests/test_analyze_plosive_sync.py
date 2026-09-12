@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 from types import SimpleNamespace
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from video_integrity_analyzer.plosive_manifest import BilabialToken
 
@@ -166,6 +169,71 @@ class PlosiveRunnerHelperTests(unittest.TestCase):
             {"median_aperture": math.nan, "values": (1.0, math.inf)}
         )
         self.assertEqual(converted, {"median_aperture": None, "values": [1.0, None]})
+
+    def test_empty_csv_tables_keep_placeholder_column(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "epochs.csv"
+            MODULE._write_csv(target, [])
+            self.assertEqual(target.read_bytes(), b'empty\r\n""\r\n')
+            MODULE._write_csv(target, [{"a": [1, math.nan], "b": None}])
+            self.assertEqual(target.read_bytes(), b'a,b\r\n"[1,null]",\r\n')
+        self.assertEqual(MODULE._json_cell((1.0, math.inf)), "[1.0,null]")
+
+    def test_helper_source_change_invalidates_checkpoint_with_same_size_and_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            package = project / "video_integrity_analyzer"
+            package.mkdir()
+            for name in (
+                "artifact_io.py", "plosive_sync.py", "plosive_manifest.py", "plosive_stats.py"
+            ):
+                (package / name).write_bytes(
+                    (MODULE.PROJECT / "video_integrity_analyzer" / name).read_bytes()
+                )
+            helper = package / "artifact_io.py"
+            helper.write_bytes(helper.read_bytes() + b"\n# regression version a\n")
+            source = project / "synthetic-input.bin"
+            source.write_bytes(b"synthetic input")
+            configuration_arguments = {
+                "video": source,
+                "words_json": source,
+                "intervals_json": source,
+                "speaker_token_manifest": source,
+                "face_model": source,
+                "roi": None,
+                "interview_end_s": 1.0,
+                "interview_end_source": "synthetic",
+                "acoustic_config": MODULE.AcousticReleaseConfig.conservative(),
+                "visual_config": MODULE.VisualReleaseConfig(),
+                "token_inventory_scope": "synthetic",
+                "frame_timing": {},
+            }
+            records = {"synthetic-event": {"attempted": True, "status": "measurable"}}
+            checkpoint = project / "checkpoint.json"
+            with patch.object(MODULE, "PROJECT", project):
+                original = MODULE._measurement_configuration(**configuration_arguments)
+                MODULE._write_json(
+                    checkpoint,
+                    {"configuration": original, "records_by_event_id": records},
+                )
+                self.assertEqual(
+                    MODULE._load_checkpoint(checkpoint, original, resume=True), records
+                )
+
+                metadata = helper.stat()
+                helper.write_bytes(
+                    helper.read_bytes().replace(
+                        b"# regression version a", b"# regression version b"
+                    )
+                )
+                os.utime(helper, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                self.assertEqual(helper.stat().st_size, metadata.st_size)
+                self.assertEqual(helper.stat().st_mtime_ns, metadata.st_mtime_ns)
+                updated = MODULE._measurement_configuration(**configuration_arguments)
+                with self.assertRaisesRegex(
+                    RuntimeError, "different inputs or measurement settings"
+                ):
+                    MODULE._load_checkpoint(checkpoint, updated, resume=True)
 
     def test_interview_end_defaults_to_media_duration(self) -> None:
         args = MODULE.build_parser().parse_args(

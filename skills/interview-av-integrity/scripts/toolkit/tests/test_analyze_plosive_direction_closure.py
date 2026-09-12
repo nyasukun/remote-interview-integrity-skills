@@ -257,6 +257,22 @@ class DirectionClosureTests(unittest.TestCase):
             self.assertFalse(late["analysis_eligible"])
             self.assertIn("token_at_or_after_cutoff", late["exclusion_reasons"])
 
+    def test_loader_requires_canonical_events_key_and_empty_csv_is_header_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            aliased = root / "aliased.json"
+            aliased.write_text(json.dumps({"annotations": []}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "events list"):
+                MODULE._load_json_object(aliased, "blinded events JSON")
+            canonical = root / "canonical.json"
+            canonical.write_text(json.dumps({"events": [], "media": {}}), encoding="utf-8")
+            self.assertEqual(
+                MODULE._load_json_object(canonical, "blinded events JSON")["events"], []
+            )
+            target = root / "epochs.csv"
+            MODULE._write_csv(target, [])
+            self.assertEqual(target.read_bytes(), b"\r\n")
+
     def test_build_records_accepts_acoustic_review_finalizer_schema(self) -> None:
         selected = {
             "event_id": "p-finalized",

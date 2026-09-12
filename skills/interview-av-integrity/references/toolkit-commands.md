@@ -2,6 +2,12 @@
 
 `SKILL.md` からの相対位置で、toolkit rootは `scripts/toolkit` である。
 
+- 初回準備: [runtime](#runtime)、[local word timestamps](#local-word-timestamps)、[case workspace](#case-workspace)
+- 少数区間の予備診断: [analysis-protocol.md](analysis-protocol.md#予備診断)。手動測定には自動解析用のASR・face modelを要求しない
+- 解析: [speaker/token manifest](#speakertoken-manifest)、[automated plosive analysis](#automated-plosive-analysis)
+- 盲検注釈: [blinded review](#blinded-review)、[結合と視覚review](#結合directionclosure視覚blind-review)
+- 動画制作: [evidence manifest/render/QA](#evidence-manifestrenderqa)
+
 ## runtime
 
 Python 3.10–3.12を使う。解析案件のworkspace内に専用venvを作り、toolkitをeditable installする。
@@ -51,6 +57,9 @@ python SKILL_DIR/scripts/create_case_workspace.py \
   --case-dir /absolute/case-dir
 ```
 
+予備診断では、同じcommandの `--start START_S --end END_S` で対象範囲を記録できる。値は原本の秒時刻とし、離れた区間・対照の一覧は生成された `protocol/analysis_protocol.md` に固定する。
+このhelperは `case.json` に原本fingerprintと範囲を保存するだけで、媒体を切り出したり後続analyzerの対象を絞ったりしない。media probeと実測は[予備診断手順](analysis-protocol.md#予備診断)に従う。
+
 ## speaker/token manifest
 
 まず `assets/speaker-references.example.json` を案件用にコピーし、各speakerの表示名が安定する参照時刻とgroupを設定する。
@@ -81,7 +90,8 @@ CASE_DIR/.venv/bin/python SKILL_DIR/scripts/toolkit/scripts/analyze_plosive_sync
   --max-events 3 --bootstrap-iterations 20 --permutation-iterations 20 --skip-plots
 ```
 
-smoke後、`--max-events`を外して全件実行する。
+`--max-events 3` は先頭3件のeligible eventによる動作確認であり、対象・対照を選んだ予備診断や代表標本とはみなさない。
+完全分析を依頼された場合だけ、smoke後に `--max-events`、反復数を20にする2つの指定、`--skip-plots` を外し、解析protocolに固定した反復数で対象範囲の全件を実行する。予備診断だけなら[analysis-protocol.md](analysis-protocol.md#予備診断)の選定区間・対照を測定して報告する。
 
 POSIX shared memoryが許可されない環境では、同じコマンドの前に `VIDEO_INTEGRITY_FACE_TRANSPORT=file` を設定する。これはprivate temporary directoryのfile-backed mmapを使い、媒体を外部送信しない。
 
@@ -198,46 +208,9 @@ CASE_DIR/.venv/bin/python SKILL_DIR/scripts/render_layout_preview.py \
   --report CASE_DIR/evidence/layout_preview_provenance.json
 ```
 
-provenanceは `PENDING_USER_APPROVAL` の不変な承認前記録である。承認済みreferenceとimplementation previewをreview sheetで並べ、文字・人物・値ではなく、構造と品質を確認する。全checkを目視でPASSしたpreviewだけをユーザーへ示し、そのpreviewの明示承認を得る。
+provenanceは `PENDING_USER_APPROVAL` の不変な承認前記録である。[layout-quality-gate.md](layout-quality-gate.md)に従い、review sheetで全checkを目視確認したpreviewだけをユーザーへ示し、そのpreviewの明示承認を得る。
 
-承認後、event manifestのトップレベルへ次を追加する。pathはevent manifest基準の相対pathまたは絶対path、hashは実値を使う。
-
-```json
-{
-  "layout_review": {
-    "status": "APPROVED",
-    "approval_basis": "user explicitly approved the displayed production-path preview",
-    "preview": {
-      "path": "layout_implementation_preview.png",
-      "sha256": "<actual preview sha256>"
-    },
-    "preview_provenance": {
-      "path": "layout_preview_provenance.json",
-      "sha256": "<actual provenance sha256>"
-    },
-    "review_sheet": {
-      "path": "layout_review_sheet.png",
-      "sha256": "<actual review-sheet sha256>"
-    },
-    "quality_checks": {
-      "reference_viewed_first": true,
-      "visual_hierarchy_and_density_match": true,
-      "case_finding_speed_and_legend_readable": true,
-      "source_panel_remains_dominant": true,
-      "mouth_roi_and_same_frame_inset_traceable": true,
-      "mouth_crop_contains_lips_and_jaw": true,
-      "closure_window_and_burst_emphasis_readable": true,
-      "release_marker_and_playhead_readable": true,
-      "japanese_text_readable_at_1920x1080": true,
-      "limitations_and_uncertainty_readable": true,
-      "production_renderer_preview": true,
-      "side_by_side_review_completed": true
-    }
-  }
-}
-```
-
-layout reference、manifest basis、renderer source、preview、provenance、review sheet、approval status、checkのいずれかが不一致・未完了なら、full-render CLIは案件媒体を読む前にFAILする。
+承認後は[artifact-schemas.md](artifact-schemas.md#layout_review)の `layout_review` をevent manifestへ追加する。正確なquality check名とpath/hash形式は同schemaに従う。
 
 レイアウトhard gateがPASSした後:
 

@@ -9,17 +9,11 @@ Positive selected-edge lag means that the visible lip release follows audio.
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import itertools
-import json
 import math
-import os
 import sys
-import tempfile
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -29,6 +23,21 @@ import numpy as np
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
+# Private aliases keep the historical script-level names importable for tests
+# and callers that load this file as a module.
+from video_integrity_analyzer.artifact_io import (  # noqa: E402
+    atomic_write_text as _atomic_write_text,  # noqa: F401
+    csv_cell as _csv_value,  # noqa: F401
+    finite_float as _finite_float,
+    json_ready as _json_ready,  # noqa: F401
+    load_events_document,
+    nested as _nested,
+    now_utc as _now_utc,
+    path_fingerprint as _path_fingerprint,
+    visual_config_from_automated,
+    write_csv as _write_csv,
+    write_json as _write_json,
+)
 from video_integrity_analyzer.plosive_sync import (  # noqa: E402
     VisualReleaseConfig,
 )
@@ -78,26 +87,6 @@ def analysis_definitions() -> tuple[AnalysisSpec, ...]:
     )
 
 
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _nested(value: object, key: str) -> Mapping[str, object]:
-    if isinstance(value, Mapping):
-        child = value.get(key)
-        if isinstance(child, Mapping):
-            return child
-    return {}
-
-
-def _finite_float(value: object) -> float | None:
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if math.isfinite(result) else None
-
-
 def _normalized_blinded_event(
     event: Mapping[str, object],
     automated_selection: Mapping[str, object],
@@ -131,93 +120,10 @@ def _normalized_blinded_event(
     return selection, status, audio_time, confidence
 
 
-def _json_ready(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_ready(item) for item in value]
-    if isinstance(value, np.generic):
-        return _json_ready(value.item())
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
-
-
-def _path_fingerprint(path: Path) -> dict[str, object]:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    stat = path.stat()
-    return {
-        "path": str(path),
-        "size_bytes": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-        "sha256": digest.hexdigest(),
-    }
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output:
-            output.write(text)
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-
-
-def _write_json(path: Path, value: object) -> None:
-    _atomic_write_text(
-        path,
-        json.dumps(_json_ready(value), ensure_ascii=False, indent=2, allow_nan=False)
-        + "\n",
-    )
-
-
-def _csv_value(value: object) -> object:
-    value = _json_ready(value)
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return "" if value is None else value
-
-
-def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fieldnames:
-                fieldnames.append(str(key))
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output:
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({key: _csv_value(row.get(key)) for key in fieldnames})
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-
-
 def _load_json_object(path: Path, label: str) -> Mapping[str, object]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, Mapping) or not isinstance(value.get("events"), list):
-        raise ValueError(f"{label} must be an object with an events list")
-    return value
+    """Load an events document; only the canonical ``events`` key is accepted."""
+
+    return load_events_document(path, label)
 
 
 def _index_events(
@@ -237,20 +143,6 @@ def _index_events(
     if duplicates:
         raise ValueError(f"duplicate {label} event id: " + ", ".join(sorted(duplicates)))
     return indexed
-
-
-def visual_config_from_automated(
-    automated: Mapping[str, object],
-) -> VisualReleaseConfig:
-    raw = _nested(_nested(automated, "configuration"), "protocol").get(
-        "visual_release_config"
-    )
-    if not isinstance(raw, Mapping):
-        return VisualReleaseConfig()
-    allowed = {field.name for field in fields(VisualReleaseConfig)}
-    return VisualReleaseConfig(
-        **{key: value for key, value in raw.items() if key in allowed}
-    )
 
 
 def _normalized_samples(raw_samples: object) -> list[dict[str, object]]:
