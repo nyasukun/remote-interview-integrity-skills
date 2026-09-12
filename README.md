@@ -46,7 +46,9 @@ https://github.com/user-attachments/assets/2338b4a9-b5c1-4215-90d5-0ed98288837a
 
 ### 唇と音声の同期検証
 
-`/p/` 6イベントの音響開放と口唇閉鎖、開放を並べた注釈動画です。
+旧バージョンで `/p/` として選定した6イベントを並べた注釈動画です。
+一部のマーカーに対象音節との対応ずれが疑われるため、現行版の精度評価や音素時刻の正解ラベルには使いません。
+入力動画を使った再検証は[合成音声の評価記録](examples/synthetic-interview/README.md)を参照してください。
 
 https://github.com/user-attachments/assets/62b8ff48-1c95-4c20-9fd7-252755a396c7
 

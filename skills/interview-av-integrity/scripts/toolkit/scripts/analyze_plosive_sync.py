@@ -418,6 +418,11 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "acoustic_distance_from_anchor_ms": acoustic_candidate.get(
             "distance_from_anchor_ms"
         ),
+        "acoustic_candidate_attribution": acoustic_candidate.get("attribution"),
+        "acoustic_target_window_s": acoustic.get("target_window_s"),
+        "acoustic_top_candidate_time_s": acoustic.get("top_candidate_time_s"),
+        "acoustic_target_occurrence_index": acoustic.get("target_occurrence_index"),
+        "acoustic_target_occurrence_count": acoustic.get("target_occurrence_count"),
         "visual_contact_time_s": visual.get("contact_time_s"),
         "visual_candidate_time_s": visual.get("candidate_time_s"),
         "visual_release_time_s": visual.get("release_time_s"),
@@ -550,6 +555,8 @@ def _measure_token(
         end_s=end_s,
         sample_rate=AUDIO_SAMPLE_RATE,
     )
+    # The ASR word spans bound *attribution* only: a burst inside a
+    # neighbouring word's span is not reported as this token's release.
     acoustic = estimate_acoustic_release(
         audio.waveform,
         audio.sample_rate,
@@ -558,6 +565,11 @@ def _measure_token(
         phone_class=token.phoneme_class,
         coverage_mask=audio.coverage_mask,
         config=acoustic_config,
+        target_window_s=(token.token_start_s, token.token_end_s),
+        previous_window_s=token.previous_word_window_s,
+        next_window_s=token.next_word_window_s,
+        target_occurrence_index=token.word_occurrence_index,
+        target_occurrence_anchors_s=token.word_occurrence_anchors_s or None,
     )
 
     # The visual search receives the ASR anchor, not the acoustic estimate.

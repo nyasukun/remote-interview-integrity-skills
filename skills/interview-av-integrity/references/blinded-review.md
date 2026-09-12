@@ -29,6 +29,31 @@
 
 時刻はabsoluteとanchor-relativeの両方を保存する。注釈CSVとblind keyを別々にhash化する。
 
+`measurable` にできるのは、対象と同じ `p` または `b` の実現を音声側で確認できた行だけである。
+母音の立ち上がり、隣接音節、`other`、`uncertain` を対象破裂音の時刻として採用しない。
+短い破裂成分を分離できない場合は、強いエネルギーピークへ置き換えず `unmeasurable` にする。
+自動候補が0件でも音声資料を作り、測定不能例を台帳に残す。
+
+`prepare_blinded_acoustic_review.py` のschema v3 keyは、入力eventsのSHA-256、レビュー窓、復号できた音声区間 `review_window.covered_intervals` を保持する。
+`finalize_blinded_acoustic_review.py` は、入力hash、event ID、anchor、候補時刻、選択時刻の窓内包含を検証する。
+ASRや自動解析を再実行した場合はkeyとレビュー資料も作り直し、連番IDが同じでも古い注釈を転用しない。
+`review_window` または `covered_intervals` がない旧keyは再生成が必要である。
+窓内でも、PTS欠落やファイル末尾のpaddingは測定可能な音声として扱わず、その区間の時刻は採用しない。
+確定後の方向・閉鎖解析でも、記録された入力hashが解析対象eventsと一致することを検証する。
+旧形式の確定済み注釈で実現音が未記録の場合は `legacy_unspecified` として区別し、確認済みの対象音素と同一視しない。
+
+### 自動候補の読み方
+
+runnerは対象語と前後のASR word区間を検出器へ渡す。
+`attribution=target` は粗い語区間との対応を示し、対象の破裂音が確認済みという意味ではない。
+区間境界の競合、重複する語区間、同一語内の複数の両唇音に対する割り当てが解けない場合は保留する。
+候補の表示件数を減らしても、採否判定には切り捨て前の候補を使う。
+
+近いピークをまとめる `same_event_window_ms=40` と、間のエネルギー連続性を調べる `same_event_continuity_db=10` は未校正の初期値である。
+`same_event_as_selected` はこの規則で同じ候補群になったことを示す。
+波形の立ち上がりが破裂、気息、母音のどれに当たるかは、このフラグや `confidence=high` だけでは決まらない。
+音響時刻を映像の口形へ合わせて選び直さず、音声側で対応が確定しなければ測定不能として残す。
+
 ## 視覚レビュー
 
 原則として音声を消し、匿名ID、native frame、相対フレーム時刻だけを示す。最初のpassではspeaker/group、語、音響release marker、機械分類を隠す。release近傍の検索が必要な第二passでも、群と機械分類は隠す。

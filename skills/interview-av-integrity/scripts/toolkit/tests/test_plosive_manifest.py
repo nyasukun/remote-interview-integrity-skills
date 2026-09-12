@@ -85,6 +85,71 @@ class PlosiveManifestTests(unittest.TestCase):
         self.assertEqual(event.reading_text, "ばしょ")
         self.assertEqual(event.reading_source, "reading")
 
+    def test_neighbouring_word_spans_follow_transcript_order_across_segments(self) -> None:
+        whisper = {
+            "segments": [
+                {
+                    "words": [
+                        {"word": "パ", "start": 1.0, "end": 1.2, "probability": 0.99},
+                        {"word": "と", "start": 1.2, "end": 1.4, "probability": 0.99},
+                    ]
+                },
+                {
+                    "words": [
+                        {"word": "ブ", "start": 2.0, "end": 2.3, "probability": 0.99},
+                        {"word": "リ", "start": "bad", "end": 2.5, "probability": 0.99},
+                        {"word": "ポ", "start": 2.5, "end": 2.7, "probability": 0.99},
+                    ]
+                },
+            ]
+        }
+        intervals = [SpeakerInterval("e1", "s1", "candidate", 0.0, 12.0)]
+        events = extract_bilabial_tokens(
+            whisper, intervals, interview_end_s=20.0, boundary_guard_s=0.0
+        )
+        self.assertEqual([event.kana for event in events], ["パ", "ブ", "ポ"])
+        first, second, third = events
+        self.assertIsNone(first.previous_word_window_s)
+        self.assertEqual(first.next_word_window_s, (1.2, 1.4))
+        # Neighbour spans cross the segment boundary and the pause.
+        self.assertEqual(second.previous_word_window_s, (1.2, 1.4))
+        # A neighbour with unusable timestamps is disclosed as None.
+        self.assertIsNone(second.next_word_window_s)
+        self.assertIsNone(third.previous_word_window_s)
+        self.assertIsNone(third.next_word_window_s)
+        self.assertEqual(first.as_dict()["next_word_window_s"], (1.2, 1.4))
+        for event in events:
+            self.assertEqual(event.word_occurrence_index, 0)
+            self.assertEqual(event.word_occurrence_anchors_s, (event.anchor_s,))
+
+    def test_multiple_bilabial_kana_in_one_word_share_occurrence_anchors(self) -> None:
+        whisper = {
+            "segments": [
+                {
+                    "words": [
+                        {"word": "パン", "start": 0.0, "end": 0.2, "probability": 0.99},
+                        {"word": "バックアップ", "start": 1.0, "end": 1.6, "probability": 0.99},
+                        {"word": "ク", "start": 1.6, "end": 1.6, "probability": 0.99},
+                    ]
+                }
+            ]
+        }
+        intervals = [SpeakerInterval("e1", "s1", "candidate", 0.0, 12.0)]
+        events = extract_bilabial_tokens(
+            whisper, intervals, interview_end_s=20.0, boundary_guard_s=0.0
+        )
+        self.assertEqual([event.kana for event in events], ["パ", "バ", "プ"])
+        pa, ba, pu = events
+        self.assertEqual((pa.word_occurrence_index, pa.word_occurrence_anchors_s), (0, (pa.anchor_s,)))
+        self.assertEqual(ba.word_occurrence_index, 0)
+        self.assertEqual(pu.word_occurrence_index, 1)
+        self.assertEqual(ba.word_occurrence_anchors_s, (ba.anchor_s, pu.anchor_s))
+        self.assertEqual(pu.word_occurrence_anchors_s, ba.word_occurrence_anchors_s)
+        self.assertLess(ba.anchor_s, pu.anchor_s)
+        # A zero-length neighbouring word cannot bound attribution.
+        self.assertIsNone(pu.next_word_window_s)
+        self.assertEqual(ba.previous_word_window_s, (0.0, 0.2))
+
     def test_interval_overlap_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             load_speaker_intervals(
