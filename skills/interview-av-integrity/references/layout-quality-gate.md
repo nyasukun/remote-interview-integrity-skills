@@ -5,7 +5,8 @@
 `assets/layout-references/av-integrity-closure-review-approved.png` を、閉鎖証拠動画のauthoritative starting layoutとする。
 動画作業に入るagentは、まずこのPNGを画像として開き、`assets/layout-references/manifest.json` のhash・寸法と一致することを確認する。
 
-画像中の架空人物、部屋、数値、ケース番号、単語、音素、波形はダミーである。
+この画像はユーザー提供の合成layout referenceであり、実案件の証拠ではない。
+画像中の架空人物、部屋、数値、ケース番号、単語、音素、波形はダミーであり、分析値や証拠として採用しない。
 一方、次の情報階層と視覚品質は、本番rendererの出発点として扱う。
 
 - 上部のケース数、観測分類、再生速度、赤/緑凡例
@@ -24,6 +25,8 @@
 6. 差異がある場合は、承認を求める前にrendererを修正する。ダミー文言や案件依存ROI等のadaptableな差は、理由を説明する。
 
 承認済み参照には人物表現があるが、本番previewへの実案件顔画像の使用を許可するものではない。
+参照PNGの存在や過去の承認を、現在のimplementation previewの承認とみなさない。
+記録する正確なフィールドとquality check名は[artifact-schemas.md](artifact-schemas.md#layout_review)、preview生成・本番実行は[toolkit-commands.md](toolkit-commands.md#evidence-manifestrenderqa)を使う。
 
 ## 機械ゲート
 

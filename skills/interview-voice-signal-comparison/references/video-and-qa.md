@@ -6,7 +6,7 @@
 この画像はユーザー提供のsynthetic layout referenceであり、案件証拠ではない。
 
 正本にするのは、上下の情報階層、左右panel、波形・Log-Mel・下段指標panelの配置、暗色の技術レビュー表現、accent color、情報密度、限定文の視認性である。
-人物・silhouette、文字、言語名、値、timestamp、再生状態、波形、spectrogram、密度曲線、chart geometry、1672×941 canvasは正本にしない。
+人物・silhouette、文字、言語名、値、timestamp、同時再生表示を含む再生状態、波形、spectrogram、密度曲線、chart geometry、1672×941 canvasは正本にしない。
 現行の指定中心rulesと1920×1080 production profileが常に優先する。
 
 ## 既定レイアウト
@@ -40,11 +40,13 @@ previewで確認する。
 - limitation stripが読める
 - dual-mono channel表示を識別情報として扱っていない
 - previewがproduction renderer pathで作られている
+- 文字が切れておらず、score、distance、ranking、winner、本人性表示がない
 
 previewと同時に、左へ基準画像、右へproduction preview、下端へ比較checkを置いた1920×720のside-by-side review sheetを自動生成する。
 previewはPNGと同名の`.provenance.json`を生成し、基準asset/manifestのpath・hash・寸法、preview hash・寸法、review sheet hash・寸法、renderer source hash、render manifest basis hashを保存する。
 上記checkをreview sheet上で全件確認した後にだけreview sheetをユーザーへ示して承認を求める。
 明示承認後、render manifestの`layout_review`へpreview/review sheet/provenanceのpath・hash、全check、approval basisを固定する。
+正確なフィールドとquality check名は[manifest-schema.md](manifest-schema.md#layout-review)、生成コマンドは[toolkit-commands.md](toolkit-commands.md#5-動画とmappingを生成する)を使う。
 production rendererはこの記録が欠ける、未承認、hash不一致、check未完なら停止する。
 
 スキルの設置先またはrenderer sourceが変わった場合、既存の承認記録を移植して使わない。

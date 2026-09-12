@@ -3,21 +3,30 @@
 以下の例では、`VOICE_SKILL_DIR`をこの`SKILL.md`があるディレクトリ、`VOICE_PYTHON`を依存物が入ったPython 3.11以上の実行ファイルに置き換える。
 入力・出力pathに空白や日本語がある前提で、pathは常に引用する。
 
+数値比較は工程1〜3、動画制作は続けて工程4〜6を使う。工程7はtoolkitを変更した開発時に使う。
+
 ## 1. 環境確認
+
+数値比較だけなら、encoderを要求しない解析用preflightを使う。
+
+```bash
+"$VOICE_PYTHON" "$VOICE_SKILL_DIR/scripts/check_environment.py" --analysis-only
+```
+
+Python 3.11以上、PyAV、Matplotlib、NumPy、Pillow、SciPyを検査する。`status=PASS`を確認する。このモードの `encoders` は空であり、動画出力の検証結果を示さない。
+
+動画を制作する場合は、flagなしでencoderも含めて検査する。
 
 ```bash
 "$VOICE_PYTHON" "$VOICE_SKILL_DIR/scripts/check_environment.py"
 ```
 
 `status`が`PASS`で、PyAV、Matplotlib、NumPy、Pillow、SciPy、`libx264`、AAC encoderがすべて`PASS`であることを確認する。
-不足がある場合は媒体を処理せず、依存物の準備についてユーザーへ説明する。
+選択したモードの必須項目に不足がある場合は媒体を処理せず、依存物の準備についてユーザーへ説明する。
 
 ## 2. Clip manifestを固定する
 
-[manifest-schema.md](manifest-schema.md)のschema v1で作成する。
-指定群は1 clip、比較群は1〜3群、各比較群は1 clip以上とする。
-`designated_group_id`と`comparison_group_ids`を必ず明記する。
-再生順は`clips`配列の順なので、既定では指定clipを先頭にし、その後に比較clipを置く。
+[manifest-schema.md](manifest-schema.md#clip-manifest)のschema v1と区間数・再生順の不変条件に従う。
 
 manifestを固定したら、そのSHA-256を記録する。
 
@@ -68,33 +77,8 @@ PYTHONDONTWRITEBYTECODE=1 \
 
 ## 4. Render manifestを固定する
 
-[manifest-schema.md](manifest-schema.md)のschema v2で作成する。
-次の参照は、直前の解析で生成した同一ディレクトリの成果物を指す。
-
-```json
-{
-  "feature_artifacts": {
-    "artifact_manifest": {
-      "path": "/path/to/analysis_output/acoustic_features/artifact_manifest.json",
-      "sha256": "<actual sha256>"
-    },
-    "acoustic_features": {
-      "path": "/path/to/analysis_output/acoustic_features/acoustic_features.json",
-      "sha256": "<actual sha256>"
-    }
-  }
-}
-```
-
-次の4値は同じ任意group IDにする。
-
-- clip manifestの`designated_group_id`
-- `comparison.anchor_group`
-- `comparison.display_anchor_group`
-- `comparison.point_group`
-
-`comparison.reference_groups`はclip manifestの`comparison_group_ids`と同じ順序にする。
-`delta_definition`は正確に`group metric minus user-designated point metric`とする。
+[manifest-schema.md](manifest-schema.md#render-manifest)のschema v2で作成する。
+直前の解析runのfeature artifactsを実値hash付きで参照し、同schemaのanchor consistencyを確認する。`layout_review`はpreviewの明示承認後に追加する。
 
 ## 5. 動画とmappingを生成する
 
@@ -122,58 +106,10 @@ PYTHONDONTWRITEBYTECODE=1 \
 ```
 
 `layout_preview.review-sheet.png`と`layout_preview.png.provenance.json`も同時生成される。
-review sheetは左に基準画像、右にproduction previewを置いた比較用成果物である。
-provenanceには基準asset/manifestのhash・寸法、preview hash・寸法、review sheet hash・寸法、renderer source hash、`layout_review`を除いたrender manifest basis hashが入る。
-
-review sheetを原寸で目視し、次を全件確認する。
-
-- 構図と情報密度が基準画像と同等で、文字が切れていない
-- 指定anchorは左に固定、比較clipは右に1件ずつ表示される
-- waveform、Log-Mel、playheadが読める
-- 下段は共有signed-delta axisで指定値が0、群rangeとmedianが読める
-- score、distance、ranking、winner、本人性表示がない
-- dual-monoを識別的chartとして表示しない
-- limitation stripが読める
-
-全件PASSしたreview sheetだけをユーザーへ示し、明示承認を得る。
-承認後にrender manifestへ次を追加する。pathはrender manifest基準の相対pathまたは絶対path、hashは実値を入れる。
-
-```json
-{
-  "layout_review": {
-    "status": "APPROVED",
-    "approval_basis": "user explicitly approved the displayed production preview",
-    "preview": {
-      "path": "/path/to/output/layout_preview.png",
-      "sha256": "<actual preview sha256>"
-    },
-    "preview_provenance": {
-      "path": "/path/to/output/layout_preview.png.provenance.json",
-      "sha256": "<actual preview provenance sha256>"
-    },
-    "review_sheet": {
-      "path": "/path/to/output/layout_preview.review-sheet.png",
-      "sha256": "<actual review sheet sha256>"
-    },
-    "quality_checks": {
-      "reference_viewed_first": true,
-      "visual_hierarchy_matches": true,
-      "designated_anchor_fixed_left": true,
-      "comparison_panel_on_right": true,
-      "waveform_and_logmel_readable": true,
-      "shared_signed_delta_axes": true,
-      "range_and_median_visible": true,
-      "no_ranking_or_identity_claim": true,
-      "dual_mono_treated_as_non_identifying": true,
-      "limitation_strip_readable": true,
-      "production_renderer_preview": true,
-      "side_by_side_review_sheet_inspected": true
-    }
-  }
-}
-```
-
+[video-and-qa.md](video-and-qa.md#preview)に従い、review sheetを原寸で確認し、全checkがPASSしたpreviewの明示承認を得る。
+承認後、[manifest-schema.md](manifest-schema.md#layout-review)の `layout_review` をrender manifestへ固定する。
 基準asset、preview、review sheet、provenance、renderer source、basis hash、承認status、checkのいずれかが不一致ならrendererは本番前にFAILする。
+
 承認後に本番動画を生成する。
 
 ```bash

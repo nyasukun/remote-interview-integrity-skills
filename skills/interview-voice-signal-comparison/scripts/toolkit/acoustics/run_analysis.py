@@ -17,10 +17,8 @@ if __package__ in (None, ""):
         build_payload,
         write_outputs,
     )
-    from extract_acoustic_features import (  # type: ignore[import-not-found]
-        extract,
-        load_manifest,
-    )
+    from extract_acoustic_features import extract  # type: ignore[import-not-found]
+    from input_manifest import load_manifest  # type: ignore[import-not-found]
     from signal_features import sha256_file  # type: ignore[import-not-found]
     from verify_artifacts import (  # type: ignore[import-not-found]
         verify_acoustic_dir,
@@ -28,7 +26,8 @@ if __package__ in (None, ""):
     )
 else:
     from .designated_centered import build_payload, write_outputs
-    from .extract_acoustic_features import extract, load_manifest
+    from .extract_acoustic_features import extract
+    from .input_manifest import load_manifest
     from .signal_features import sha256_file
     from .verify_artifacts import verify_acoustic_dir, verify_designated_dir
 

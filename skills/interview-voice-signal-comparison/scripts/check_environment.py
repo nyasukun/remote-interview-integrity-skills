@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import os
@@ -10,7 +11,7 @@ import platform
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 REQUIRED_MODULES = {
@@ -26,7 +27,7 @@ def _module_version(module: Any) -> str:
     return str(getattr(module, "__version__", "unknown"))
 
 
-def check() -> dict[str, Any]:
+def check(*, analysis_only: bool = False) -> dict[str, Any]:
     failures: list[str] = []
     modules: dict[str, dict[str, str]] = {}
 
@@ -56,7 +57,7 @@ def check() -> dict[str, Any]:
             }
 
     codecs: dict[str, dict[str, str]] = {}
-    if "av" in loaded:
+    if not analysis_only and "av" in loaded:
         av = loaded["av"]
         for codec_name, mode in (("libx264", "w"), ("aac", "w")):
             try:
@@ -89,8 +90,15 @@ def check() -> dict[str, Any]:
     }
 
 
-def main() -> int:
-    report = check()
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="check numeric-analysis dependencies without requiring video encoders",
+    )
+    args = parser.parse_args(argv)
+    report = check(analysis_only=args.analysis_only)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report["status"] == "PASS" else 1
 

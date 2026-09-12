@@ -15,16 +15,12 @@ remain confounded in a single call recording.
 from __future__ import annotations
 
 import argparse
-import csv
-import hashlib
 import json
 import math
 import os
 import sys
-import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -32,6 +28,18 @@ from typing import Any, Iterable, Mapping, Sequence
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
+# Private aliases keep the historical script-level names importable for tests
+# and callers that load this file as a module.
+from video_integrity_analyzer.artifact_io import (  # noqa: E402
+    atomic_write_text as _atomic_write_text,  # noqa: F401
+    csv_cell as _json_cell,  # noqa: F401
+    json_ready as _json_ready,  # noqa: F401
+    nested as _nested,
+    now_utc as _now_utc,
+    path_fingerprint as _path_fingerprint,
+    write_csv,
+    write_json as _write_json,
+)
 from video_integrity_analyzer.media import probe_media, probe_video_frame_timing  # noqa: E402
 from video_integrity_analyzer.face_process import preflight_face_runtime  # noqa: E402
 from video_integrity_analyzer.plosive_manifest import (  # noqa: E402
@@ -329,114 +337,10 @@ def enforce_speaker_token_manifest(
     return joined_tokens, metadata_by_event, audit
 
 
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _path_fingerprint(path: Path) -> dict[str, object]:
-    resolved = path.expanduser().resolve()
-    stat = resolved.stat()
-    digest = hashlib.sha256()
-    with resolved.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return {
-        "path": str(resolved),
-        "size_bytes": int(stat.st_size),
-        "mtime_ns": int(stat.st_mtime_ns),
-        "sha256": digest.hexdigest(),
-    }
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output:
-            output.write(text)
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-
-
-def _write_json(path: Path, value: object) -> None:
-    _atomic_write_text(
-        path,
-        json.dumps(_json_ready(value), ensure_ascii=False, indent=2, allow_nan=False)
-        + "\n",
-    )
-
-
-def _json_ready(value: object) -> object:
-    """Convert audit structures to strict JSON without hiding missing geometry."""
-
-    if isinstance(value, Mapping):
-        return {str(key): _json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_ready(item) for item in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    # NumPy scalar values can appear in downstream diagnostic extensions.
-    if hasattr(value, "item") and callable(getattr(value, "item")):
-        try:
-            return _json_ready(value.item())  # type: ignore[union-attr]
-        except (TypeError, ValueError):
-            pass
-    return value
-
-
-def _json_cell(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (list, tuple, dict)):
-        return json.dumps(
-            _json_ready(value), ensure_ascii=False, separators=(",", ":")
-        )
-    if isinstance(value, float) and not math.isfinite(value):
-        return ""
-    return str(value)
-
-
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for key in row:
-            if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
-    if not fieldnames:
-        fieldnames = ["empty"]
-        rows = ({"empty": ""},)
+    """Write a table atomically; an empty table keeps its ``empty`` placeholder column."""
 
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output:
-            writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({key: _json_cell(row.get(key)) for key in fieldnames})
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-
-
-def _nested(mapping: Mapping[str, object], key: str) -> Mapping[str, object]:
-    value = mapping.get(key)
-    return value if isinstance(value, Mapping) else {}
+    write_csv(path, rows, empty_placeholder_column="empty")
 
 
 def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
@@ -761,6 +665,9 @@ def _measurement_configuration(
         },
         "implementation": {
             "runner": _path_fingerprint(Path(__file__)),
+            "artifact_io": _path_fingerprint(
+                PROJECT / "video_integrity_analyzer" / "artifact_io.py"
+            ),
             "plosive_sync": _path_fingerprint(
                 PROJECT / "video_integrity_analyzer" / "plosive_sync.py"
             ),

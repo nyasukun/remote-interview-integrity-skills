@@ -62,6 +62,9 @@ full pipelineでは、特徴抽出用のclip manifestと動画用render manifest
 - `0 <= start_s < end_s`で、source音声範囲内。
 - 全groupにrole、表示label、色を与える。
 - language・speaker labelの由来を音声推定と誤認しない文言で保存する。
+- 再生順は `clips` 配列順。既定では指定clipを先頭にし、比較clipを続ける。
+
+選定後のmanifestを固定し、SHA-256を記録する。
 
 ## Render manifest
 
@@ -74,8 +77,14 @@ full pipelineでは、特徴抽出用のclip manifestと動画用render manifest
     "sha256": "<sha256>"
   },
   "feature_artifacts": {
-    "acoustic_features": "/absolute/path/to/acoustic_features.json",
-    "artifact_manifest": "/absolute/path/to/artifact_manifest.json"
+    "acoustic_features": {
+      "path": "/absolute/path/to/analysis_output/acoustic_features/acoustic_features.json",
+      "sha256": "<actual sha256>"
+    },
+    "artifact_manifest": {
+      "path": "/absolute/path/to/analysis_output/acoustic_features/artifact_manifest.json",
+      "sha256": "<actual sha256>"
+    }
   },
   "comparison": {
     "anchor_group": "designated",
@@ -129,13 +138,19 @@ full pipelineでは、特徴抽出用のclip manifestと動画用render manifest
 }
 ```
 
+`feature_artifacts`は同じ解析runが生成した同一 `acoustic_features` ディレクトリの成果物を指す。
+pathはrender manifest基準の相対pathまたは絶対path、hashは実値を使う。
+
+### Layout review
+
 `layout_review`はpreview生成時には省略する。
-承認済み構図基準を最初にviewし、production renderer previewとside-by-side review sheetを品質確認してユーザーが明示承認した後にだけ追加する。
-rendererは承認済みpreview、review sheet、provenanceのhash、renderer source hash、render manifest basis、全checkをfail-closedで検証する。
+[video-and-qa.md](video-and-qa.md#preview)に従い、基準画像との比較・全quality check・ユーザーの明示承認が完了した後にだけ、上記の承認記録を追加する。
+rendererは基準asset、承認済みpreview、review sheet、provenanceのhash、renderer source hash、render manifest basis、全check、承認statusをfail-closedで検証する。
 
 ### Anchor consistency
 
-`comparison.anchor_group`、`display_anchor_group`、`point_group`、summaryの`anchor_group`は同じ指定群を指す。
+clip manifestの `designated_group_id`、`comparison.anchor_group`、`display_anchor_group`、`point_group`、summaryの`anchor_group`は同じ任意の指定群IDを指す。
+`comparison.reference_groups`はclip manifestの `comparison_group_ids` と同じ順序、`delta_definition`は正確に `group metric minus user-designated point metric` とする。
 候補群や参照群のrangeを補助表示する場合も、`candidate_range_group`等の別名にし、anchorと呼ばない。
 `relations_to_anchor`のように基準が曖昧なlegacy fieldを混在させない。
 
