@@ -185,6 +185,32 @@ def evaluate(report: dict[str, Any]) -> None:
             "status": "accepted" if estimate.measurable else "rejected",
             "estimate": estimate.as_dict(),
         })
+        if label == "API":
+            # Independent waveform/spectrogram review found a periodic rise
+            # here, not a validated burst. This is a negative regression,
+            # never a replacement /p/ reference or a detector-specific offset.
+            periodic_interval = (14.392, 14.402)
+            periodic_candidates = [
+                candidate for candidate in estimate.candidates
+                if periodic_interval[0] <= candidate.time_s <= periodic_interval[1]
+            ]
+            passed = bool(periodic_candidates) and all(
+                not candidate.broadband_release_evidence
+                for candidate in periodic_candidates
+            ) and not (
+                estimate.candidate_time_s is not None
+                and periodic_interval[0] <= estimate.candidate_time_s <= periodic_interval[1]
+            )
+            report["periodic_onset_regression"] = {
+                "context": "first_API",
+                "review_basis": "audio_waveform_and_spectrogram_only",
+                "periodic_rise_interval_s": list(periodic_interval),
+                "confirmed_bilabial_release_s": None,
+                "diagnostic_candidates_retained": bool(periodic_candidates),
+                "passed": passed,
+            }
+            if not passed:
+                failures.append("periodic_API_onset_not_rejected_or_audit_candidate_lost")
 
     baseline = decode_audio_window(
         SOURCE,

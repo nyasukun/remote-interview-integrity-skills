@@ -275,6 +275,15 @@ class AcousticReleaseConfig:
     high_frequency_low_hz: float = 2_500.0
     flux_low_hz: float = 500.0
     maximum_candidates: int = 8
+    # A rise in harmonic energy is not a release burst. Check a short frame
+    # near the onset for broadband, non-tonal energy above the local floor.
+    # These are uncalibrated acoustic screening values, not a /p,b/ classifier.
+    burst_frame_ms: float = 4.0
+    burst_search_radius_ms: float = 4.0
+    burst_minimum_flatness: float = 0.12
+    burst_minimum_high_frequency_fraction: float = 0.10
+    burst_minimum_above_pre_db: float = 10.0
+    burst_maximum_below_peak_db: float = 18.0
 
     @classmethod
     def conservative(cls, **overrides: Any) -> "AcousticReleaseConfig":
@@ -304,6 +313,13 @@ class AcousticReleaseCandidate:
     attribution: str = "unbounded"
     distance_from_target_window_ms: float | None = None
     same_event_as_selected: bool = False
+    # None for rank-only callers; estimate_acoustic_release evaluates the gate.
+    broadband_release_evidence: bool | None = None
+    burst_evidence_time_s: float | None = None
+    burst_spectral_flatness: float | None = None
+    burst_high_frequency_fraction: float | None = None
+    burst_rms_dbfs: float | None = None
+    burst_support_coverage: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -332,6 +348,9 @@ class AcousticReleaseEstimate:
     # Position of this token among the bilabial kana of the same ASR word.
     target_occurrence_index: int = 0
     target_occurrence_count: int = 1
+    # Waveform screening localizes an onset; neither coarse word attribution
+    # nor broadband energy verifies that it is the requested consonant.
+    phoneme_identity_status: str = "unverified_requires_audio_review"
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -376,6 +395,21 @@ def _validate_attribution_config(config: AcousticReleaseConfig) -> None:
         raise TypeError("maximum_candidates must be an integer")
     if limit < 1:
         raise ValueError("maximum_candidates must be at least 1")
+    for name in (
+        "burst_frame_ms", "burst_search_radius_ms", "burst_minimum_above_pre_db",
+        "burst_maximum_below_peak_db",
+    ):
+        value = getattr(config, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError(f"{name} must be a number")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive")
+    for name in ("burst_minimum_flatness", "burst_minimum_high_frequency_fraction"):
+        value = getattr(config, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError(f"{name} must be a number")
+        if not math.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(f"{name} must be in (0, 1]")
 
 
 def _edge_distance_s(time_s: float, window: tuple[float, float]) -> float:
@@ -834,6 +868,100 @@ def _continuous_release(
     return bool(np.min(between) >= earlier.pre_rms_dbfs + continuity_db)
 
 
+def _with_broadband_release_evidence(
+    candidate: AcousticReleaseCandidate,
+    values: np.ndarray,
+    covered: np.ndarray,
+    sample_rate: int,
+    window_start_s: float,
+    config: AcousticReleaseConfig,
+) -> AcousticReleaseCandidate:
+    """Screen harmonic rises without turning ambient noise into burst evidence.
+
+    Flux and band-energy rises can be arbitrarily large for a ramped sinusoid.
+    Short-frame spectral flatness adds independent spectral-shape evidence.
+    Flatness, HF fraction, and level must pass on the *same* covered frame;
+    otherwise quiet noise before a vowel could satisfy the shape requirement.
+    This rejects unsupported onsets, but cannot identify a consonant's place of
+    articulation. In particular it cannot distinguish /p/ from /t/ or /k/.
+    """
+
+    candidate = replace(candidate, broadband_release_evidence=False)
+    length = max(16, round(config.burst_frame_ms * sample_rate / 1000.0))
+    hop = max(1, round(config.hop_ms * sample_rate / 1000.0))
+    radius = round(config.burst_search_radius_ms * sample_rate / 1000.0)
+    center = round((candidate.time_s - window_start_s) * sample_rate)
+    # Missing samples filled with zero during ranking can create a false
+    # broadband edge. Both the ranking frame and the evidence search support
+    # must be observed; aggregate 90% coverage cannot certify this onset.
+    support_radius = max(
+        radius + length // 2,
+        round(config.frame_ms * sample_rate / 2000.0),
+    )
+    support_start = center - support_radius
+    support_end = center + support_radius + 1
+    support_count = support_end - support_start
+    observed = int(np.count_nonzero(covered[max(0, support_start):min(len(covered), support_end)]))
+    candidate = replace(candidate, burst_support_coverage=observed / support_count)
+    if observed != support_count:
+        return candidate
+    fft_size = 1 << (length - 1).bit_length()
+    frequencies = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
+    shape_band = (frequencies >= 500.0) & (frequencies <= min(8000.0, sample_rate / 2))
+    broad_band = (frequencies >= config.broadband_low_hz) & (frequencies <= config.spectral_high_hz)
+    high_band = broad_band & (frequencies >= config.high_frequency_low_hz)
+    if np.count_nonzero(shape_band) < 4 or not np.any(high_band):
+        return candidate
+    # The longer ranking baseline can contain a preceding release. A short,
+    # fully covered quiet interval immediately before this onset also counts
+    # as a floor, so distinct bursts separated by quiet remain competitors.
+    pre_levels = [candidate.pre_rms_dbfs]
+    for offset_ms in range(-20, -5, 2):
+        start = center + round(offset_ms * sample_rate / 1000.0) - length // 2
+        end = start + length
+        if start >= 0 and end <= len(values) and np.all(covered[start:end]):
+            pre_levels.append(float(20 * np.log10(max(float(np.sqrt(np.mean(values[start:end]**2))), 1e-8))))
+    level_floor = max(
+        min(pre_levels) + config.burst_minimum_above_pre_db,
+        candidate.peak_rms_dbfs - config.burst_maximum_below_peak_db,
+    )
+    frames: list[tuple[bool, float, float, float, float, float]] = []
+    taper = np.hanning(length)
+    for frame_center in range(center - radius, center + radius + 1, hop):
+        start = frame_center - length // 2
+        end = start + length
+        if start < 0 or end > len(values) or not np.all(covered[start:end]):
+            continue
+        frame = values[start:end] - np.mean(values[start:end])
+        level = float(20 * np.log10(max(float(np.sqrt(np.mean(frame**2))), 1e-8)))
+        power = np.abs(np.fft.rfft(frame * taper, n=fft_size)) ** 2
+        spectrum = power[shape_band]
+        mean_power = float(np.mean(spectrum))
+        if mean_power <= 1e-16:
+            continue
+        flatness = float(np.exp(np.mean(np.log(np.maximum(spectrum, mean_power * 1e-12)))) / mean_power)
+        fraction = float(np.sum(power[high_band]) / max(float(np.sum(power[broad_band])), 1e-16))
+        support = min(
+            flatness / config.burst_minimum_flatness,
+            fraction / config.burst_minimum_high_frequency_fraction,
+        )
+        passed = support >= 1.0 and level >= level_floor
+        # An above-floor frame ranks before quiet noise, even on rejection.
+        quality = support if level >= level_floor else -1.0
+        frames.append((passed, quality, flatness, fraction, level, window_start_s + frame_center / sample_rate))
+    if not frames:
+        return candidate
+    passed, _, flatness, fraction, level, evidence_time = max(frames, key=lambda item: (item[0], item[1], item[4]))
+    return replace(
+        candidate,
+        broadband_release_evidence=passed,
+        burst_evidence_time_s=evidence_time,
+        burst_spectral_flatness=flatness,
+        burst_high_frequency_fraction=fraction,
+        burst_rms_dbfs=level,
+    )
+
+
 def estimate_acoustic_release(
     waveform: np.ndarray,
     sample_rate: int,
@@ -902,6 +1030,16 @@ def estimate_acoustic_release(
         previous_window_s=previous_window_s,
         next_window_s=next_window_s,
     )
+    values = np.asarray(waveform, dtype=np.float64).reshape(-1)
+    covered = np.isfinite(values)
+    if coverage_mask is not None:
+        covered &= np.asarray(coverage_mask, dtype=bool).reshape(-1)
+    all_candidates = tuple(
+        _with_broadband_release_evidence(
+            candidate, values, covered, sample_rate, window_start_s, config
+        )
+        for candidate in all_candidates
+    )
 
     def unmeasurable(
         reasons: tuple[str, ...],
@@ -939,6 +1077,21 @@ def estimate_acoustic_release(
             reasons = ("ambiguous_target_attribution",)
         else:
             reasons = ("no_acoustic_candidate_within_target_word",)
+        return unmeasurable(reasons, all_candidates)
+
+    # Generic energy peaks remain in the audit list, but may neither own a
+    # bilabial occurrence nor displace a weaker supported transient. Do this
+    # before clustering: a loud vowel must not absorb its earlier burst.
+    incomplete_coverage = any(
+        c.local_coverage < config.minimum_coverage
+        or c.burst_support_coverage != 1.0
+        for c in selectable
+    )
+    selectable = tuple(c for c in selectable if c.broadband_release_evidence)
+    if not selectable:
+        reasons = ("no_broadband_release_evidence",)
+        if incomplete_coverage:
+            reasons += ("incomplete_audio_coverage",)
         return unmeasurable(reasons, all_candidates)
 
     required_energy_rise = (
@@ -1001,10 +1154,6 @@ def estimate_acoustic_release(
     # Burst, aspiration and voicing may produce several nearby score peaks.
     # Grouping is an acoustic heuristic requiring both proximity and energy
     # continuity; it does not establish a common phonetic cause.
-    values = np.asarray(waveform, dtype=np.float64).reshape(-1)
-    covered = np.isfinite(values)
-    if coverage_mask is not None:
-        covered &= np.asarray(coverage_mask, dtype=bool).reshape(-1)
     envelope_t, envelope_db = _rms_envelope_db(
         np.where(covered, values, 0.0),
         sample_rate,
@@ -1128,6 +1277,7 @@ def estimate_acoustic_release(
             candidate
             for candidate in all_candidates
             if candidate.attribution not in _SELECTABLE_ATTRIBUTIONS
+            and candidate.broadband_release_evidence
             and candidate.time_s not in same_event_times
             and candidate.distance_from_target_window_ms is not None
             and candidate.distance_from_target_window_ms <= config.target_boundary_guard_ms

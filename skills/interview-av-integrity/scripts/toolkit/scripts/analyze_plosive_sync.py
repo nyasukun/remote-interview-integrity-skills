@@ -365,6 +365,8 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "phoneme_class": selection.get("phoneme_class"),
         "kana": selection.get("kana"),
         "token_text": selection.get("token_text"),
+        "reading_text": selection.get("reading_text"),
+        "reading_source": selection.get("reading_source"),
         "token_start_s": selection.get("token_start_s"),
         "token_end_s": selection.get("token_end_s"),
         "asr_anchor_s": selection.get("anchor_s"),
@@ -406,7 +408,19 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "acoustic_acceptance_mode": acoustic.get("acceptance_mode"),
         "acoustic_confidence": acoustic.get("confidence"),
         "acoustic_measurable": acoustic.get("measurable"),
+        "acoustic_phoneme_identity_status": acoustic.get("phoneme_identity_status"),
         "acoustic_exclusion_reasons": acoustic.get("exclusion_reasons"),
+        # Retain evidence for rejected peaks even when no marker is selected.
+        "acoustic_candidates": acoustic.get("candidates"),
+        "acoustic_broadband_release_evidence": acoustic_candidate.get(
+            "broadband_release_evidence"
+        ),
+        "acoustic_burst_spectral_flatness": acoustic_candidate.get(
+            "burst_spectral_flatness"
+        ),
+        "acoustic_burst_high_frequency_fraction": acoustic_candidate.get(
+            "burst_high_frequency_fraction"
+        ),
         "acoustic_spectral_flux_z": acoustic_candidate.get("spectral_flux_z"),
         "acoustic_high_frequency_rise_db": acoustic_candidate.get(
             "high_frequency_rise_db"

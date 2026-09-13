@@ -255,6 +255,139 @@ class AcousticReleaseTests(unittest.TestCase):
         self.assertIn("incomplete_audio_coverage", estimate.exclusion_reasons)
 
 
+class AcousticBurstEvidenceTests(unittest.TestCase):
+    """Constructed signals distinguish transient evidence from a tonal rise.
+
+    These controls test candidate selection, not Japanese phoneme recognition.
+    """
+
+    SAMPLE_RATE = 48_000
+
+    def test_harmonic_only_ramps_cannot_supply_a_release(self) -> None:
+        times = np.arange(int(self.SAMPLE_RATE * 0.9)) / self.SAMPLE_RATE
+        for mode in ("permissive", "conservative"):
+            for ramp_ms in (1, 5, 10, 20, 30):
+                rng = np.random.default_rng(20260913)
+                waveform = rng.normal(0.0, 2e-5, len(times))
+                ramp = np.clip((times - 0.350) / (ramp_ms / 1000.0), 0.0, 1.0)
+                waveform += ramp * (
+                    0.30 * np.sin(2 * np.pi * 220 * times)
+                    + 0.06 * np.sin(2 * np.pi * 2_500 * times)
+                )
+                with self.subTest(mode=mode, ramp_ms=ramp_ms):
+                    estimate = estimate_acoustic_release(
+                        waveform,
+                        self.SAMPLE_RATE,
+                        window_start_s=0.0,
+                        anchor_time_s=0.360,
+                        phone_class="p",
+                        config=AcousticReleaseConfig(acceptance_mode=mode),
+                        target_window_s=(0.10, 0.80),
+                    )
+                    self.assertFalse(estimate.measurable)
+                    self.assertIsNone(estimate.release_time_s)
+                    self.assertIsNone(estimate.candidate_time_s)
+                    self.assertIsNone(estimate.selected_candidate)
+                    self.assertTrue(estimate.candidates)
+                    self.assertIn(
+                        "no_broadband_release_evidence", estimate.exclusion_reasons
+                    )
+
+    def test_louder_earlier_harmonic_rise_does_not_replace_later_burst(self) -> None:
+        release_s = 0.450
+        waveform = synthetic_release_sequence(
+            [(release_s, 0.08, 0.09, None, 220.0)], seed=20260913
+        )
+        times = np.arange(len(waveform)) / self.SAMPLE_RATE
+        earlier_envelope = np.clip((times - 0.300) / 0.010, 0.0, 1.0)
+        earlier_envelope *= np.clip((0.385 - times) / 0.020, 0.0, 1.0)
+        waveform += earlier_envelope * (
+            0.30 * np.sin(2 * np.pi * 220 * times)
+            + 0.06 * np.sin(2 * np.pi * 2_500 * times)
+        )
+        for mode in ("permissive", "conservative"):
+            with self.subTest(mode=mode):
+                estimate = estimate_acoustic_release(
+                    waveform,
+                    self.SAMPLE_RATE,
+                    window_start_s=0.0,
+                    anchor_time_s=0.440,
+                    config=AcousticReleaseConfig(acceptance_mode=mode),
+                    target_window_s=(0.20, 0.65),
+                )
+                self.assertTrue(estimate.measurable, estimate.exclusion_reasons)
+                self.assertLess(abs(float(estimate.release_time_s) - release_s), 0.006)
+                self.assertTrue(
+                    any(abs(candidate.time_s - 0.300) < 0.010 for candidate in estimate.candidates)
+                )
+
+    def test_prevoicing_does_not_require_silence_before_a_burst(self) -> None:
+        release_s = 0.350
+        waveform = synthetic_plosive(release_s=release_s)
+        times = np.arange(len(waveform)) / self.SAMPLE_RATE
+        prevoicing = np.clip((times - 0.200) / 0.010, 0.0, 1.0)
+        waveform += 0.005 * prevoicing * np.sin(2 * np.pi * 110 * times)
+        for mode in ("permissive", "conservative"):
+            with self.subTest(mode=mode):
+                estimate = estimate_acoustic_release(
+                    waveform,
+                    self.SAMPLE_RATE,
+                    window_start_s=0.0,
+                    anchor_time_s=0.340,
+                    phone_class="b",
+                    config=AcousticReleaseConfig(acceptance_mode=mode),
+                    target_window_s=(0.28, 0.50),
+                )
+                self.assertTrue(estimate.measurable, estimate.exclusion_reasons)
+                self.assertLess(abs(float(estimate.release_time_s) - release_s), 0.006)
+
+    def test_unobserved_burst_cannot_be_replaced_by_post_gap_tonal_onset(self) -> None:
+        # The only injected noise transient is unobserved. Most of the review
+        # window is covered, so aggregate coverage alone cannot protect its
+        # onset boundary from being replaced by the following tonal rise.
+        for replacement in ("masked", "nan", "inf"):
+            waveform = synthetic_plosive()
+            coverage = np.ones(len(waveform), dtype=bool)
+            missing = slice(round(0.350 * self.SAMPLE_RATE), round(0.353 * self.SAMPLE_RATE))
+            if replacement == "masked":
+                coverage[missing] = False
+            else:
+                waveform[missing] = float(replacement)
+            for mode in ("permissive", "conservative"):
+                with self.subTest(replacement=replacement, mode=mode):
+                    estimate = estimate_acoustic_release(
+                        waveform,
+                        self.SAMPLE_RATE,
+                        window_start_s=0.0,
+                        anchor_time_s=0.340,
+                        coverage_mask=coverage,
+                        config=AcousticReleaseConfig(acceptance_mode=mode),
+                        target_window_s=(0.28, 0.50),
+                    )
+                    self.assertFalse(estimate.measurable)
+                    self.assertIsNone(estimate.release_time_s)
+                    self.assertIn("incomplete_audio_coverage", estimate.exclusion_reasons)
+
+    def test_invalid_burst_controls_cannot_disable_evidence_screening(self) -> None:
+        invalid_overrides = (
+            {"burst_frame_ms": -4.0},
+            {"burst_search_radius_ms": math.inf},
+            {"burst_minimum_flatness": 0.0},
+            {"burst_minimum_high_frequency_fraction": math.nan},
+            {"burst_minimum_above_pre_db": True},
+            {"burst_maximum_below_peak_db": "18"},
+        )
+        for override in invalid_overrides:
+            with self.subTest(override=override), self.assertRaises((ValueError, TypeError)):
+                estimate_acoustic_release(
+                    synthetic_plosive(),
+                    self.SAMPLE_RATE,
+                    window_start_s=0.0,
+                    anchor_time_s=0.340,
+                    config=AcousticReleaseConfig(**override),
+                )
+
+
 class AcousticTargetAttributionTests(unittest.TestCase):
     """Constructed known-onset cases; they do not claim phoneme identity."""
 

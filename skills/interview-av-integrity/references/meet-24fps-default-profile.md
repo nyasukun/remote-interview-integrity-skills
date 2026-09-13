@@ -10,8 +10,9 @@ fps、解像度、codec、タイル寸法、話者が違う場合は、positive 
 - decode: 48 kHz
 - STFT: 8 ms Hann、1 ms hop、FFT 1024
 - release候補: energy rise、12 ms slope、高域rise、spectral flux
+- 自動選択の補助ゲート: 短いフレームの広帯域スペクトル証拠。周期的なエネルギー上昇だけをreleaseにしない。閾値・限界は [blinded-review.md](blinded-review.md#自動候補の読み方) に従う
 - 粗アンカー探索: おおむね -300〜+220 ms。語・発音により拡張する
-- top-1の無条件採用は禁止。保守ゲート不通過は音響のみでtop候補をレビュー
+- top-1の無条件採用は禁止。保守ゲート不通過の候補も証拠値とともに保持し、音響のみでレビュー
 
 ## 口唇
 
