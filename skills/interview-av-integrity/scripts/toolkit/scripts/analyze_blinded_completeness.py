@@ -49,6 +49,10 @@ from video_integrity_analyzer.plosive_sync import (  # noqa: E402
     VisualReleaseConfig,
     identify_mouth_shape_at_acoustic_release,
 )
+from video_integrity_analyzer.acoustic_annotations import (  # noqa: E402
+    acoustic_annotation_guard,
+    validate_automated_source,
+)
 
 
 SCHEMA_VERSION = 1
@@ -268,6 +272,18 @@ def join_blinded_annotations(
                     f"measurable annotation {event_id} requires a finite, non-negative "
                     "selected_release_time_s"
                 )
+            attribution, acoustic_reasons = acoustic_annotation_guard(
+                annotation, selected_class, selected_time
+            )
+            record["acoustic_attribution"] = attribution
+            if acoustic_reasons:
+                record.update(
+                    source_annotation_status=status,
+                    annotation_status="unmeasurable",
+                    exclusion_reasons=acoustic_reasons,
+                )
+                records.append(record)
+                continue
             visual_time = _finite_float(
                 _nested(_nested(automated_event, "measurement"), "visual").get(
                     "release_time_s"
@@ -318,6 +334,9 @@ def join_blinded_annotations(
         "automated_without_annotation_ids": missing_annotations,
         "annotation_status_counts": dict(sorted(status_counts.items())),
         "audio_measurable_annotation_count": status_counts.get("measurable", 0),
+        "audio_eligible_annotation_count": sum(record["annotation_status"] == "measurable" for record in records),
+        "legacy_unspecified_attribution_count": sum(record.get("acoustic_attribution") == "legacy_unspecified" for record in records),
+        "acoustic_attribution_excluded_ids": [record["runner_event_id"] for record in records if "acoustic_realization_not_target" in record["exclusion_reasons"]],
         "combined_measurable_count": sum(record["measurable"] is True for record in records),
         "audio_measurable_missing_visual_count": len(audio_measurable_missing_visual),
         "audio_measurable_missing_visual_ids": audio_measurable_missing_visual,
@@ -1112,6 +1131,8 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "annotation_present": record.get("annotation_present"),
         "annotation_status": record.get("annotation_status"),
         "annotation_confidence": annotation.get("confidence"),
+        "acoustic_attribution": record.get("acoustic_attribution"),
+        "acoustic_realization": annotation.get("acoustic_realization", _nested(annotation, "annotation").get("acoustic_realization")),
         "audio_release_time_s": record.get("audio_release_time_s"),
         "visual_release_time_s": record.get("visual_release_time_s"),
         "lag_ms": record.get("lag_ms"),
@@ -1143,10 +1164,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     annotations = _load_json_object(annotations_path, "annotations JSON")
     automated = _load_json_object(automated_path, "automated events JSON")
+    source_provenance = validate_automated_source(annotations, automated_path)
     visual_config = visual_config_from_automated(automated)
     records, audit = join_blinded_annotations(
         annotations, automated, visual_config=visual_config
     )
+    audit["automated_source_provenance"] = source_provenance
     media = _nested(automated, "media")
     fps = _finite_float(media.get("average_fps"))
     if fps is None or fps <= 0:
@@ -1223,6 +1246,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         {
             "schema_version": SCHEMA_VERSION,
             "created_utc": analysis["created_utc"],
+            "metadata": {"input_sha256": {"automated_events": source_provenance["actual_automated_events_sha256"]}},
             "join_audit": audit,
             "events": records,
         },

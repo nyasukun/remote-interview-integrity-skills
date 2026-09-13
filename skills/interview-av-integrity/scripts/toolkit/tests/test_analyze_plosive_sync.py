@@ -159,6 +159,92 @@ class PlosiveRunnerHelperTests(unittest.TestCase):
             counts["mouth_shape_at_accepted_acoustic_release"]["transition"], 1
         )
 
+    def test_measure_token_bounds_acoustic_attribution_with_asr_word_spans(self) -> None:
+        import numpy as np
+
+        from video_integrity_analyzer.plosive_sync import (
+            AcousticReleaseEstimate,
+            AudioWindow,
+        )
+
+        token = BilabialToken(
+            event_id="pb-0001",
+            speaker="candidate",
+            group="candidate",
+            epoch_id="e1",
+            phoneme_class="p",
+            kana="ポ",
+            token_text="ポ",
+            token_start_s=21.0,
+            token_end_s=21.08,
+            anchor_s=21.04,
+            asr_probability=0.99,
+            segment_id=1,
+            segment_no_speech_probability=0.0,
+            eligible=True,
+            exclusion_reason=None,
+            previous_word_window_s=(20.88, 21.0),
+            next_word_window_s=(21.08, 21.14),
+            word_occurrence_index=0,
+            word_occurrence_anchors_s=(21.04,),
+        )
+        waveform = np.zeros(48_000, dtype=np.float64)
+        audio = AudioWindow(
+            start_s=20.29,
+            sample_rate=48_000,
+            waveform=waveform,
+            coverage_mask=np.ones(len(waveform), dtype=bool),
+            coverage_fraction=1.0,
+        )
+        acoustic = AcousticReleaseEstimate(
+            anchor_time_s=21.04,
+            phone_class="p",
+            candidate_time_s=None,
+            release_time_s=None,
+            score=None,
+            runner_up_margin=None,
+            acceptance_mode="conservative",
+            confidence="insufficient",
+            measurable=False,
+            time_resolution_ms=1.0,
+            exclusion_reasons=("no_acoustic_candidate_within_target_word",),
+            selected_candidate=None,
+            candidates=(),
+            target_window_s=(21.0, 21.08),
+        )
+        with patch.object(MODULE, "decode_audio_window", return_value=audio), patch.object(
+            MODULE, "estimate_acoustic_release", return_value=acoustic
+        ) as estimator, patch.object(
+            MODULE, "extract_native_lip_samples", return_value=[]
+        ):
+            record = MODULE._measure_token(
+                token,
+                video=Path("synthetic.mp4"),
+                face_model=Path("face.task"),
+                roi=None,
+                interview_end_s=60.0,
+                acoustic_config=MODULE.AcousticReleaseConfig.conservative(),
+                visual_config=MODULE.VisualReleaseConfig(),
+            )
+        kwargs = estimator.call_args.kwargs
+        self.assertEqual(kwargs["target_window_s"], (21.0, 21.08))
+        self.assertEqual(kwargs["previous_window_s"], (20.88, 21.0))
+        self.assertEqual(kwargs["next_window_s"], (21.08, 21.14))
+        self.assertEqual(kwargs["anchor_time_s"], 21.04)
+        self.assertEqual(kwargs["target_occurrence_index"], 0)
+        self.assertEqual(kwargs["target_occurrence_anchors_s"], (21.04,))
+        self.assertFalse(record["measurable"])
+        self.assertIsNone(record["diagnostic_mouth_shape_at_top_acoustic_candidate"])
+        self.assertIn(
+            "no_acoustic_candidate_within_target_word", record["exclusion_reasons"]
+        )
+        row = MODULE.event_csv_row(record)
+        self.assertEqual(row["acoustic_target_window_s"], (21.0, 21.08))
+        self.assertIsNone(row["acoustic_top_candidate_time_s"])
+        self.assertIsNone(row["acoustic_candidate_attribution"])
+        self.assertEqual(row["acoustic_target_occurrence_index"], 0)
+        self.assertEqual(row["acoustic_target_occurrence_count"], 1)
+
     def test_roi_validation_rejects_out_of_bounds_values(self) -> None:
         self.assertEqual(MODULE._parse_roi([0.1, 0.2, 0.9, 0.8]), (0.1, 0.2, 0.9, 0.8))
         with self.assertRaises(ValueError):

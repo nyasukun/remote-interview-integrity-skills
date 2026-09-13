@@ -129,6 +129,72 @@ class DirectionClosureTests(unittest.TestCase):
         self.assertEqual(result["closure_category"], "unavailable")
         self.assertEqual(result["direction"], "unavailable")
 
+    def test_isolated_open_frame_does_not_establish_absent_closure(self) -> None:
+        result = MODULE.analyze_event_geometry(
+            [sample(10.0)], audio_time_s=10.0, fps=24.0, config=self.config
+        )
+        self.assertFalse(result["face_valid"])
+        self.assertEqual(result["closure_category"], "unavailable")
+        self.assertEqual(result["closure_window_expected_native_frame_count"], 9)
+        self.assertEqual(result["closure_window_native_frame_count"], 1)
+        self.assertIn("missing_preclosure_window_coverage", result["face_exclusion_reasons"])
+
+    def test_complete_pts_with_unusable_frames_does_not_establish_absent_closure(self) -> None:
+        for unusable_offsets, failure in (({-3, -2, -1}, "missing_face"), ({-3, -2, -1}, "repeated"), ({-1}, "missing_face")):
+            with self.subTest(offsets=unusable_offsets, failure=failure):
+                rows = sequence(10.0, {})
+                for row in rows:
+                    if round((row["time_s"] - 10.0) * 24) in unusable_offsets:
+                        if failure == "repeated":
+                            row["repeated_frame"] = True
+                        else:
+                            row["face_detected"] = False
+                result = MODULE.analyze_event_geometry(rows, audio_time_s=10.0, fps=24.0, config=self.config)
+                self.assertEqual(result["closure_window_native_coverage_fraction"], 1.0)
+                self.assertGreaterEqual(result["closure_window_usable_fraction"], 0.6)
+                self.assertFalse(result["face_valid"])
+                self.assertEqual(result["closure_category"], "unavailable")
+                self.assertIn("incomplete_usable_frame_coverage_for_absence", result["face_exclusion_reasons"])
+
+    def test_partial_usable_coverage_preserves_positive_contact_evidence(self) -> None:
+        for states, expected in (({-5: "contact"}, "weak_contact"), ({-5: "contact", -4: "contact"}, "strong_contact")):
+            for failure in ("missing_face", "repeated"):
+                with self.subTest(states=states, failure=failure):
+                    rows = sequence(10.0, states)
+                    for row in rows:
+                        if round((row["time_s"] - 10.0) * 24) in {-3, -2, -1}:
+                            if failure == "repeated":
+                                row["repeated_frame"] = True
+                            else:
+                                row["face_detected"] = False
+                    result = MODULE.analyze_event_geometry(rows, audio_time_s=10.0, fps=24.0, config=self.config)
+                    self.assertTrue(result["face_valid"])
+                    self.assertEqual(result["closure_category"], expected)
+                    self.assertAlmostEqual(result["closure_window_usable_fraction"], 6 / 9)
+                    self.assertNotIn("incomplete_usable_frame_coverage_for_absence", result["face_exclusion_reasons"])
+
+    def test_missing_preclosure_or_internal_native_frames_is_unavailable(self) -> None:
+        full = sequence(10.0, {})
+        for rows, reason in (
+            ([row for row in full if row["time_s"] >= 10.0], "missing_preclosure_window_coverage"),
+            ([row for row in full if abs(row["time_s"] - (10.0 - 3.0 / 24.0)) > 1e-6], "native_frame_gap_in_closure_window"),
+        ):
+            with self.subTest(reason=reason):
+                result = MODULE.analyze_event_geometry(rows, audio_time_s=10.0, fps=24.0, config=self.config)
+                self.assertEqual(result["closure_category"], "unavailable")
+                self.assertIn(reason, result["closure_window_coverage_exclusion_reasons"])
+
+    def test_complete_native_window_tolerates_pts_rounding(self) -> None:
+        for states, expected in (({}, "no_visible_contact"), ({-2: "contact", -1: "contact"}, "strong_contact")):
+            rows = sequence(10.0, states)
+            for index, row in enumerate(rows):
+                row["time_s"] = round(row["time_s"], 5) + (1e-5 if index % 2 else -1e-5)
+            result = MODULE.analyze_event_geometry(rows, audio_time_s=10.0, fps=24.0, config=self.config)
+            self.assertTrue(result["face_valid"])
+            self.assertEqual(result["closure_category"], expected)
+            self.assertEqual(result["closure_window_native_coverage_fraction"], 1.0)
+            self.assertEqual(result["closure_window_coverage_exclusion_reasons"], [])
+
     def test_exact_permutation_has_no_monte_carlo_correction(self) -> None:
         result = MODULE.exact_one_sided_median_permutation(
             np.asarray([1.0]), np.asarray([0.0, 0.0])
@@ -319,6 +385,20 @@ class DirectionClosureTests(unittest.TestCase):
         self.assertEqual(records[0]["audio_release_time_s"], 10.0)
         self.assertEqual(records[0]["annotation_confidence"], "high")
         self.assertEqual(records[0]["selection"], selected)
+        self.assertEqual(audit["legacy_unspecified_attribution_count"], 1)
+        csv_row = MODULE.event_csv_row(records[0])
+        self.assertEqual(csv_row["acoustic_attribution"], "legacy_unspecified")
+        self.assertEqual(csv_row["annotation_confidence"], "high")
+        self.assertIn("acoustic_realization", csv_row)
+
+    def test_stale_finalized_automated_hash_is_rejected_before_join(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            blind, automated = root / "blind.json", root / "automated.json"
+            blind.write_text(json.dumps({"events": [], "metadata": {"input_sha256": {"automated_events": "stale"}}}))
+            automated.write_text(json.dumps({"events": [], "media": {"average_fps": 24}}))
+            with self.assertRaisesRegex(ValueError, "SHA-256 does not match"):
+                MODULE.run(argparse.Namespace(blinded_events_json=blind, automated_events_json=automated, output_dir=root / "output", overwrite=False))
 
     def test_geometry_protocol_controls_windows_and_direction_margin(self) -> None:
         protocol = MODULE.DirectionClosureProtocol(
@@ -348,6 +428,36 @@ class DirectionClosureTests(unittest.TestCase):
         self.assertAlmostEqual(result["edge_search_start_s"], 9.85)
         self.assertAlmostEqual(result["edge_search_end_s"], 10.3)
         self.assertFalse(result["post_audio_only_contact"])
+
+    def test_non_target_and_missing_audio_annotations_stay_excluded_in_audit(self) -> None:
+        selected = {"event_id": "event-1", "phoneme_class": "p"}
+        automated = {"events": [
+            {"selection": selected, "lip_samples": sequence(10.0, {})},
+            {"selection": {"event_id": "missing", "phoneme_class": "p"}},
+        ]}
+        for label in ("other", "uncertain", "b"):
+            for nested in (False, True):
+                row = {"runner_event_id": "event-1", "status": "measurable", "selected_release_time_s": 10.0}
+                if nested:
+                    row["annotation"] = {"acoustic_realization": label}
+                else:
+                    row["acoustic_realization"] = label
+                with self.subTest(label=label, nested=nested):
+                    records, audit = MODULE.build_records({"events": [row]}, automated, fps=24.0, config=self.config)
+                    self.assertEqual(len(records), 2)
+                    self.assertFalse(records[0]["analysis_eligible"])
+                    self.assertIsNone(records[0]["geometry"])
+                    self.assertIn("acoustic_realization_not_target", records[0]["exclusion_reasons"])
+                    self.assertIn("missing_blinded_annotation", records[1]["exclusion_reasons"])
+                    self.assertEqual(audit["automated_without_annotation_ids"], ["missing"])
+
+    def test_direct_release_outside_review_window_is_not_measured(self) -> None:
+        row = {"runner_event_id": "event-1", "status": "measurable", "selected_release_time_s": 10.0,
+               "acoustic_realization": "p", "review_window": {"start_s": 8.0, "end_s": 9.0}}
+        auto = {"events": [{"selection": {"event_id": "event-1", "phoneme_class": "p"}, "lip_samples": sequence(10.0, {})}]}
+        records, _ = MODULE.build_records({"events": [row]}, auto, fps=24.0, config=self.config)
+        self.assertFalse(records[0]["analysis_eligible"])
+        self.assertIn("acoustic_release_outside_review_window", records[0]["exclusion_reasons"])
 
 
 if __name__ == "__main__":

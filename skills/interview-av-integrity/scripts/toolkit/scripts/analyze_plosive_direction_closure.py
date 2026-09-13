@@ -41,6 +41,10 @@ from video_integrity_analyzer.artifact_io import (  # noqa: E402
 from video_integrity_analyzer.plosive_sync import (  # noqa: E402
     VisualReleaseConfig,
 )
+from video_integrity_analyzer.acoustic_annotations import (  # noqa: E402
+    acoustic_annotation_guard,
+    validate_automated_source,
+)
 
 
 SCHEMA_VERSION = 1
@@ -340,11 +344,37 @@ def analyze_event_geometry(
     if not math.isclose(protocol.fps, fps, rel_tol=1e-9, abs_tol=1e-12):
         raise ValueError("protocol.fps must match fps")
     samples = classify_sample_quality(_normalized_samples(raw_samples), config)
+    closure_start_s = audio_time_s - protocol.closure_before_s
+    closure_end_s = audio_time_s + protocol.closure_after_s
+    period_s = 1.0 / fps
+    pts_tolerance_s = max(1e-6, period_s * 0.02)
     closure_window = _samples_in_window(
         samples,
-        audio_time_s - protocol.closure_before_s,
-        audio_time_s + protocol.closure_after_s,
+        closure_start_s - pts_tolerance_s,
+        closure_end_s + pts_tolerance_s,
     )
+    # Infer the expected native grid only to assess missing evidence. Never
+    # interpolate absent mouth frames or treat an unobserved interval as open.
+    phase_s = float(samples[0]["time_s"]) if samples else audio_time_s
+    first_index = math.ceil((closure_start_s - phase_s - pts_tolerance_s) / period_s)
+    last_index = math.floor((closure_end_s - phase_s + pts_tolerance_s) / period_s)
+    expected_count = max(1, last_index - first_index + 1)
+    native_times = [float(sample["time_s"]) for sample in closure_window]
+    start_gap_s = max(0.0, native_times[0] - closure_start_s) if native_times else None
+    end_gap_s = max(0.0, closure_end_s - native_times[-1]) if native_times else None
+    maximum_gap_s = max(
+        (right - left for left, right in zip(native_times, native_times[1:])),
+        default=0.0,
+    ) if native_times else None
+    coverage_reasons: list[str] = []
+    if len(native_times) < expected_count:
+        coverage_reasons.append("insufficient_native_frame_coverage")
+    if start_gap_s is None or start_gap_s > period_s + pts_tolerance_s:
+        coverage_reasons.append("missing_preclosure_window_coverage")
+    if end_gap_s is None or end_gap_s > period_s + pts_tolerance_s:
+        coverage_reasons.append("missing_postrelease_window_coverage")
+    if maximum_gap_s is not None and maximum_gap_s > 1.5 * period_s + pts_tolerance_s:
+        coverage_reasons.append("native_frame_gap_in_closure_window")
     usable = [
         sample
         for sample in closure_window
@@ -355,7 +385,7 @@ def analyze_event_geometry(
     if usable:
         nearest = min(usable, key=lambda item: abs(float(item["time_s"]) - audio_time_s))
         nearest_error_ms = (float(nearest["time_s"]) - audio_time_s) * 1000.0
-    face_reasons: list[str] = []
+    face_reasons: list[str] = list(coverage_reasons)
     if not closure_window:
         face_reasons.append("no_native_pts_frames_in_closure_window")
     if valid_fraction < protocol.minimum_face_valid_fraction:
@@ -366,9 +396,13 @@ def analyze_event_geometry(
         > protocol.maximum_nearest_frame_error_s * 1000.0
     ):
         face_reasons.append("no_valid_nonrepeated_frame_near_audio_release")
+    contacts = [sample for sample in usable if sample.get("contact") is True]
+    # Partial usable evidence can establish observed contact, but it cannot
+    # establish absence: an invalid or repeated frame may conceal contact.
+    if not contacts and len(usable) < len(closure_window):
+        face_reasons.append("incomplete_usable_frame_coverage_for_absence")
     face_valid = not face_reasons
 
-    contacts = [sample for sample in usable if sample.get("contact") is True]
     if not face_valid:
         closure_category = "unavailable"
     elif len(contacts) == 0:
@@ -416,6 +450,12 @@ def analyze_event_geometry(
         "closure_window_start_s": audio_time_s - protocol.closure_before_s,
         "closure_window_end_s": audio_time_s + protocol.closure_after_s,
         "closure_window_native_frame_count": len(closure_window),
+        "closure_window_expected_native_frame_count": expected_count,
+        "closure_window_native_coverage_fraction": min(1.0, len(native_times) / expected_count),
+        "closure_window_start_gap_ms": start_gap_s * 1000.0 if start_gap_s is not None else None,
+        "closure_window_end_gap_ms": end_gap_s * 1000.0 if end_gap_s is not None else None,
+        "closure_window_maximum_gap_ms": maximum_gap_s * 1000.0 if maximum_gap_s is not None else None,
+        "closure_window_coverage_exclusion_reasons": coverage_reasons,
         "closure_window_usable_frame_count": len(usable),
         "closure_window_usable_fraction": valid_fraction,
         "nearest_usable_frame_error_ms": nearest_error_ms,
@@ -475,8 +515,8 @@ def build_records(
 
     records: list[dict[str, object]] = []
     exclusions: Counter[str] = Counter()
-    for event_id, blinded_event in blind_index.items():
-        automated_event = auto_index[event_id]
+    for event_id, automated_event in auto_index.items():
+        blinded_event = blind_index.get(event_id, {})
         automated_selection = _nested(automated_event, "selection")
         selection, status, audio_time, confidence = _normalized_blinded_event(
             blinded_event, automated_selection
@@ -487,9 +527,18 @@ def build_records(
         token_start = _finite_float(selection.get("token_start_s"))
         target = True
         reasons: list[str] = []
-        if status != "measurable" or audio_time is None:
+        attribution, acoustic_reasons = acoustic_annotation_guard(
+            blinded_event, str(selection.get("phoneme_class") or ""), audio_time
+        )
+        if not blinded_event:
+            target = False
+            reasons.append("missing_blinded_annotation")
+        if status != "measurable":
             target = False
             reasons.append("audio_release_not_measurable")
+        elif acoustic_reasons:
+            target = False
+            reasons.extend(acoustic_reasons)
         if protocol.cutoff_s is not None and (
             token_start is None or token_start >= protocol.cutoff_s
         ):
@@ -522,6 +571,8 @@ def build_records(
                 "audio_release_time_s": audio_time,
                 "annotation_status": status,
                 "annotation_confidence": confidence,
+                "acoustic_attribution": attribution,
+                "acoustic_realization": blinded_event.get("acoustic_realization", _nested(blinded_event, "annotation").get("acoustic_realization")),
                 "audio_measurable_in_scope": target,
                 "analysis_eligible": bool(target and geometry and geometry["face_valid"] is True),
                 "geometry": geometry,
@@ -534,6 +585,13 @@ def build_records(
         "blinded_event_count": len(blind_index),
         "automated_event_count": len(auto_index),
         "matched_event_count": len(blind_index),
+        "automated_without_annotation_count": len(set(auto_index) - set(blind_index)),
+        "automated_without_annotation_ids": sorted(set(auto_index) - set(blind_index)),
+        "legacy_unspecified_attribution_count": sum(
+            record["annotation_status"] == "measurable"
+            and record["acoustic_attribution"] == "legacy_unspecified"
+            for record in records
+        ),
         "audio_measurable_in_scope_count": sum(
             record["audio_measurable_in_scope"] is True for record in records
         ),
@@ -893,6 +951,9 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "token_start_s": selection.get("token_start_s"),
         "audio_release_time_s": record.get("audio_release_time_s"),
         "annotation_status": record.get("annotation_status"),
+        "annotation_confidence": record.get("annotation_confidence"),
+        "acoustic_attribution": record.get("acoustic_attribution"),
+        "acoustic_realization": record.get("acoustic_realization"),
         "audio_measurable_in_scope": record.get("audio_measurable_in_scope"),
         "analysis_eligible": record.get("analysis_eligible"),
         "closure_category": geometry.get("closure_category"),
@@ -901,6 +962,9 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "contact_frame_offsets_ms": geometry.get("contact_frame_offsets_ms"),
         "post_audio_only_contact": geometry.get("post_audio_only_contact"),
         "closure_window_native_frame_count": geometry.get("closure_window_native_frame_count"),
+        "closure_window_expected_native_frame_count": geometry.get("closure_window_expected_native_frame_count"),
+        "closure_window_native_coverage_fraction": geometry.get("closure_window_native_coverage_fraction"),
+        "closure_window_coverage_exclusion_reasons": geometry.get("closure_window_coverage_exclusion_reasons"),
         "closure_window_usable_frame_count": geometry.get("closure_window_usable_frame_count"),
         "closure_window_usable_fraction": geometry.get("closure_window_usable_fraction"),
         "edge_candidate_count": geometry.get("edge_candidate_count"),
@@ -935,6 +999,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     blinded = _load_json_object(blinded_path, "blinded events JSON")
     automated = _load_json_object(automated_path, "automated events JSON")
+    source_provenance = validate_automated_source(blinded, automated_path)
     fps = _finite_float(getattr(args, "fps", None))
     if fps is None:
         fps = _finite_float(_nested(automated, "media").get("average_fps"))
@@ -1015,6 +1080,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     records, audit = build_records(
         blinded, automated, fps=fps, config=config, protocol=protocol
     )
+    audit["automated_source_provenance"] = source_provenance
     analyses, speaker_rows, epoch_rows, comparison_rows = build_analyses(
         records,
         bootstrap_iterations=args.bootstrap_iterations,
@@ -1066,6 +1132,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         {
             "schema_version": SCHEMA_VERSION,
             "created_utc": created_utc,
+            "metadata": {"input_sha256": {"automated_events": source_provenance["actual_automated_events_sha256"]}},
             "join_and_eligibility_audit": audit,
             "events": records,
         },

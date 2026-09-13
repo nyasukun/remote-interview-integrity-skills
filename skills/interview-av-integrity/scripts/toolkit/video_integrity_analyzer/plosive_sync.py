@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -253,11 +253,37 @@ class AcousticReleaseConfig:
     conservative_minimum_runner_up_margin: float = 1.5
     conservative_minimum_offset_ms: float = -60.0
     conservative_maximum_offset_ms: float = 160.0
+    # Target attribution. Candidates are labelled against the ASR word span of
+    # the target kana and its neighbouring word spans (when supplied). Only
+    # candidates attributed to the target word are selectable. A non-target
+    # candidate within ``target_boundary_guard_ms`` of the target span whose
+    # score is within ``conservative_minimum_runner_up_margin`` of the best
+    # target candidate makes the attribution ambiguous and the event is
+    # rejected rather than reported. This is a configurable coarse-timestamp
+    # guard, not a calibrated phoneme boundary or error bound.
+    target_boundary_guard_ms: float = 40.0
+    # Nearby peaks with sufficient intervening energy form one diagnostic
+    # onset cluster. These uncalibrated grouping values do not prove that the
+    # peaks belong to one phoneme; an audio-only realization review is needed.
+    same_event_window_ms: float = 40.0
+    # Two peaks inside that window are one event only if the level between
+    # them never fell back to within this many dB of the level that preceded
+    # the earlier peak; two pulses separated by quiet stay separate.
+    same_event_continuity_db: float = 10.0
     broadband_low_hz: float = 80.0
     spectral_high_hz: float = 12_000.0
     high_frequency_low_hz: float = 2_500.0
     flux_low_hz: float = 500.0
     maximum_candidates: int = 8
+    # A rise in harmonic energy is not a release burst. Check a short frame
+    # near the onset for broadband, non-tonal energy above the local floor.
+    # These are uncalibrated acoustic screening values, not a /p,b/ classifier.
+    burst_frame_ms: float = 4.0
+    burst_search_radius_ms: float = 4.0
+    burst_minimum_flatness: float = 0.12
+    burst_minimum_high_frequency_fraction: float = 0.10
+    burst_minimum_above_pre_db: float = 10.0
+    burst_maximum_below_peak_db: float = 18.0
 
     @classmethod
     def conservative(cls, **overrides: Any) -> "AcousticReleaseConfig":
@@ -279,6 +305,21 @@ class AcousticReleaseCandidate:
     post_rms_dbfs: float
     local_coverage: float
     distance_from_anchor_ms: float
+    # ``target``: inside (or, in a transcript gap, nearest to and within the
+    # boundary guard of) the target ASR word span.  ``previous_word`` /
+    # ``next_word``: inside or nearest to a neighbouring word span.
+    # ``outside_target_window``: bounded search, but attributable to no
+    # supplied span.  ``unbounded``: no target span was supplied.
+    attribution: str = "unbounded"
+    distance_from_target_window_ms: float | None = None
+    same_event_as_selected: bool = False
+    # None for rank-only callers; estimate_acoustic_release evaluates the gate.
+    broadband_release_evidence: bool | None = None
+    burst_evidence_time_s: float | None = None
+    burst_spectral_flatness: float | None = None
+    burst_high_frequency_fraction: float | None = None
+    burst_rms_dbfs: float | None = None
+    burst_support_coverage: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -299,10 +340,160 @@ class AcousticReleaseEstimate:
     exclusion_reasons: tuple[str, ...]
     selected_candidate: AcousticReleaseCandidate | None
     candidates: tuple[AcousticReleaseCandidate, ...]
+    target_window_s: tuple[float, float] | None = None
+    # Highest-scoring target-attributed candidate. It differs from
+    # ``candidate_time_s`` only when an earlier cluster member was preferred
+    # over a louder later peak. Neither field establishes phoneme identity.
+    top_candidate_time_s: float | None = None
+    # Position of this token among the bilabial kana of the same ASR word.
+    target_occurrence_index: int = 0
+    target_occurrence_count: int = 1
+    # Waveform screening localizes an onset; neither coarse word attribution
+    # nor broadband energy verifies that it is the requested consonant.
+    phoneme_identity_status: str = "unverified_requires_audio_review"
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
         return result
+
+
+_SELECTABLE_ATTRIBUTIONS = frozenset({"target", "unbounded"})
+
+
+def _validate_window(
+    window: tuple[float, float] | None, name: str
+) -> tuple[float, float] | None:
+    if window is None:
+        return None
+    try:
+        start_s, end_s = (float(window[0]), float(window[1]))
+    except (TypeError, ValueError, IndexError) as error:
+        raise ValueError(f"{name} must be a (start_s, end_s) pair") from error
+    if not (math.isfinite(start_s) and math.isfinite(end_s)):
+        raise ValueError(f"{name} must be finite")
+    if start_s < 0.0 or end_s <= start_s:
+        raise ValueError(f"{name} must satisfy 0 <= start_s < end_s")
+    return (start_s, end_s)
+
+
+def _validate_attribution_config(config: AcousticReleaseConfig) -> None:
+    """Reject attribution controls that would silently change acceptance."""
+
+    for name in ("target_boundary_guard_ms", "same_event_window_ms"):
+        value = getattr(config, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError(f"{name} must be a number")
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+    continuity = config.same_event_continuity_db
+    if not isinstance(continuity, (int, float)) or isinstance(continuity, bool):
+        raise TypeError("same_event_continuity_db must be a number")
+    if not math.isfinite(continuity) or continuity < 0.0:
+        raise ValueError("same_event_continuity_db must be finite and non-negative")
+    limit = config.maximum_candidates
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("maximum_candidates must be an integer")
+    if limit < 1:
+        raise ValueError("maximum_candidates must be at least 1")
+    for name in (
+        "burst_frame_ms", "burst_search_radius_ms", "burst_minimum_above_pre_db",
+        "burst_maximum_below_peak_db",
+    ):
+        value = getattr(config, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError(f"{name} must be a number")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive")
+    for name in ("burst_minimum_flatness", "burst_minimum_high_frequency_fraction"):
+        value = getattr(config, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise TypeError(f"{name} must be a number")
+        if not math.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(f"{name} must be in (0, 1]")
+
+
+def _edge_distance_s(time_s: float, window: tuple[float, float]) -> float:
+    if window[0] <= time_s <= window[1]:
+        return 0.0
+    return min(abs(time_s - window[0]), abs(time_s - window[1]))
+
+
+def attribute_release_candidates(
+    candidates: Sequence[AcousticReleaseCandidate],
+    *,
+    target_window_s: tuple[float, float] | None,
+    previous_window_s: tuple[float, float] | None = None,
+    next_window_s: tuple[float, float] | None = None,
+    boundary_guard_ms: float = 40.0,
+) -> tuple[AcousticReleaseCandidate, ...]:
+    """Label each candidate with the ASR word span it most plausibly belongs to.
+
+    The transcript is rough context, not ground truth: a candidate inside the
+    target span is ``target``; one inside a neighbouring span belongs to that
+    word; one inside both (overlapping transcript spans) is
+    ``shared_word_span`` and owned by neither; in a transcript gap the nearest
+    span wins, but only within ``boundary_guard_ms`` of the target span.
+    Everything else is ``outside_target_window``. Candidates are returned
+    target-first, then by score, so the retained top candidates are the ones
+    a reviewer must judge.
+    """
+
+    target = _validate_window(target_window_s, "target_window_s")
+    neighbours = {
+        "previous_word": _validate_window(previous_window_s, "previous_window_s"),
+        "next_word": _validate_window(next_window_s, "next_window_s"),
+    }
+    if not math.isfinite(float(boundary_guard_ms)) or boundary_guard_ms < 0.0:
+        raise ValueError("boundary_guard_ms must be finite and non-negative")
+    if target is None:
+        return tuple(candidates)
+    guard_s = float(boundary_guard_ms) / 1000.0
+    labelled: list[AcousticReleaseCandidate] = []
+    for candidate in candidates:
+        time_s = float(candidate.time_s)
+        target_distance_s = _edge_distance_s(time_s, target)
+        containing = next(
+            (
+                name
+                for name, window in neighbours.items()
+                if window is not None and _edge_distance_s(time_s, window) == 0.0
+            ),
+            None,
+        )
+        if target_distance_s == 0.0:
+            attribution = "target" if containing is None else "shared_word_span"
+        else:
+            if containing is not None:
+                attribution = containing
+            else:
+                nearest_name, nearest_distance_s = min(
+                    (
+                        (name, _edge_distance_s(time_s, window))
+                        for name, window in neighbours.items()
+                        if window is not None
+                    ),
+                    key=lambda item: item[1],
+                    default=(None, math.inf),
+                )
+                if target_distance_s <= guard_s and target_distance_s <= nearest_distance_s:
+                    attribution = "target"
+                elif nearest_name is not None and nearest_distance_s < target_distance_s:
+                    attribution = nearest_name
+                else:
+                    attribution = "outside_target_window"
+        labelled.append(
+            replace(
+                candidate,
+                attribution=attribution,
+                distance_from_target_window_ms=target_distance_s * 1000.0,
+            )
+        )
+    return tuple(
+        sorted(
+            labelled,
+            key=lambda item: (item.attribution != "target", -item.score),
+        )
+    )
 
 
 def _robust_z(values: np.ndarray) -> np.ndarray:
@@ -367,10 +558,46 @@ def rank_acoustic_release_candidates(
     anchor_time_s: float,
     coverage_mask: np.ndarray | None = None,
     config: AcousticReleaseConfig | None = None,
+    target_window_s: tuple[float, float] | None = None,
+    previous_window_s: tuple[float, float] | None = None,
+    next_window_s: tuple[float, float] | None = None,
 ) -> tuple[AcousticReleaseCandidate, ...]:
-    """Rank waveform burst/release candidates near a preselected ASR anchor."""
+    """Rank waveform burst/release candidates near a preselected ASR anchor.
+
+    When ``target_window_s`` (the ASR word span containing the target kana) is
+    given, every candidate is additionally attributed to the target word, a
+    neighbouring word, or neither; see :func:`attribute_release_candidates`.
+    The wide search window itself is unchanged so alternatives stay visible.
+    At most ``config.maximum_candidates`` are returned.
+    """
 
     config = config or AcousticReleaseConfig()
+    _validate_attribution_config(config)
+    return _rank_release_candidates_untruncated(
+        waveform,
+        sample_rate,
+        window_start_s=window_start_s,
+        anchor_time_s=anchor_time_s,
+        coverage_mask=coverage_mask,
+        config=config,
+        target_window_s=target_window_s,
+        previous_window_s=previous_window_s,
+        next_window_s=next_window_s,
+    )[: config.maximum_candidates]
+
+
+def _rank_release_candidates_untruncated(
+    waveform: np.ndarray,
+    sample_rate: int,
+    *,
+    window_start_s: float,
+    anchor_time_s: float,
+    coverage_mask: np.ndarray | None,
+    config: AcousticReleaseConfig,
+    target_window_s: tuple[float, float] | None,
+    previous_window_s: tuple[float, float] | None,
+    next_window_s: tuple[float, float] | None,
+) -> tuple[AcousticReleaseCandidate, ...]:
     values = np.asarray(waveform, dtype=np.float64).reshape(-1)
     if sample_rate <= 0 or not math.isfinite(window_start_s) or not math.isfinite(anchor_time_s):
         raise ValueError("sample_rate and timestamps must be valid")
@@ -574,11 +801,164 @@ def rank_acoustic_release_candidates(
             for _, other in selected
         ):
             selected.append((raw_score, candidate))
-    return tuple(
+    ranked = tuple(
         candidate
         for _, candidate in sorted(
             selected, key=lambda item: item[1].score, reverse=True
-        )[: config.maximum_candidates]
+        )
+    )
+    # Attribute before any truncation so weak in-word candidates are not
+    # displaced from the retained list by louder neighbouring-word onsets.
+    return attribute_release_candidates(
+        ranked,
+        target_window_s=target_window_s,
+        previous_window_s=previous_window_s,
+        next_window_s=next_window_s,
+        boundary_guard_ms=config.target_boundary_guard_ms,
+    )
+
+
+def _rms_envelope_db(
+    values: np.ndarray,
+    sample_rate: int,
+    *,
+    window_start_s: float,
+    frame_ms: float,
+    hop_ms: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Short-frame RMS in dBFS on the container timeline (same grid as ranking)."""
+
+    frame_length = max(16, int(round(frame_ms * sample_rate / 1000.0)))
+    hop = max(1, int(round(hop_ms * sample_rate / 1000.0)))
+    if values.size < frame_length + hop:
+        return np.empty(0), np.empty(0)
+    frames = np.lib.stride_tricks.sliding_window_view(values, frame_length)[::hop]
+    centers_s = (
+        window_start_s
+        + (np.arange(len(frames), dtype=np.float64) * hop + (frame_length - 1) / 2.0)
+        / sample_rate
+    )
+    rms = np.sqrt(np.mean(frames**2, axis=1) + 1e-16)
+    return centers_s, 20.0 * np.log10(np.maximum(rms, 1e-8))
+
+
+def _continuous_release(
+    centers_s: np.ndarray,
+    rms_db: np.ndarray,
+    earlier: AcousticReleaseCandidate,
+    later: AcousticReleaseCandidate,
+    *,
+    continuity_db: float,
+    skip_s: float,
+) -> bool:
+    """True when the signal never fell back near the closure floor between two peaks.
+
+    A burst followed by aspiration and voicing stays well above the level that
+    preceded the burst.  Two pulses separated by quiet do not, however close
+    in time they are, so they remain separate hypotheses.  A candidate time
+    marks the start of its rise, so the comparison begins ``skip_s`` (one
+    analysis frame) later, once the frame actually contains the burst.
+    """
+
+    between = rms_db[
+        (centers_s >= earlier.time_s + skip_s) & (centers_s <= later.time_s)
+    ]
+    if not between.size:
+        return False
+    return bool(np.min(between) >= earlier.pre_rms_dbfs + continuity_db)
+
+
+def _with_broadband_release_evidence(
+    candidate: AcousticReleaseCandidate,
+    values: np.ndarray,
+    covered: np.ndarray,
+    sample_rate: int,
+    window_start_s: float,
+    config: AcousticReleaseConfig,
+) -> AcousticReleaseCandidate:
+    """Screen harmonic rises without turning ambient noise into burst evidence.
+
+    Flux and band-energy rises can be arbitrarily large for a ramped sinusoid.
+    Short-frame spectral flatness adds independent spectral-shape evidence.
+    Flatness, HF fraction, and level must pass on the *same* covered frame;
+    otherwise quiet noise before a vowel could satisfy the shape requirement.
+    This rejects unsupported onsets, but cannot identify a consonant's place of
+    articulation. In particular it cannot distinguish /p/ from /t/ or /k/.
+    """
+
+    candidate = replace(candidate, broadband_release_evidence=False)
+    length = max(16, round(config.burst_frame_ms * sample_rate / 1000.0))
+    hop = max(1, round(config.hop_ms * sample_rate / 1000.0))
+    radius = round(config.burst_search_radius_ms * sample_rate / 1000.0)
+    center = round((candidate.time_s - window_start_s) * sample_rate)
+    # Missing samples filled with zero during ranking can create a false
+    # broadband edge. Both the ranking frame and the evidence search support
+    # must be observed; aggregate 90% coverage cannot certify this onset.
+    support_radius = max(
+        radius + length // 2,
+        round(config.frame_ms * sample_rate / 2000.0),
+    )
+    support_start = center - support_radius
+    support_end = center + support_radius + 1
+    support_count = support_end - support_start
+    observed = int(np.count_nonzero(covered[max(0, support_start):min(len(covered), support_end)]))
+    candidate = replace(candidate, burst_support_coverage=observed / support_count)
+    if observed != support_count:
+        return candidate
+    fft_size = 1 << (length - 1).bit_length()
+    frequencies = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
+    shape_band = (frequencies >= 500.0) & (frequencies <= min(8000.0, sample_rate / 2))
+    broad_band = (frequencies >= config.broadband_low_hz) & (frequencies <= config.spectral_high_hz)
+    high_band = broad_band & (frequencies >= config.high_frequency_low_hz)
+    if np.count_nonzero(shape_band) < 4 or not np.any(high_band):
+        return candidate
+    # The longer ranking baseline can contain a preceding release. A short,
+    # fully covered quiet interval immediately before this onset also counts
+    # as a floor, so distinct bursts separated by quiet remain competitors.
+    pre_levels = [candidate.pre_rms_dbfs]
+    for offset_ms in range(-20, -5, 2):
+        start = center + round(offset_ms * sample_rate / 1000.0) - length // 2
+        end = start + length
+        if start >= 0 and end <= len(values) and np.all(covered[start:end]):
+            pre_levels.append(float(20 * np.log10(max(float(np.sqrt(np.mean(values[start:end]**2))), 1e-8))))
+    level_floor = max(
+        min(pre_levels) + config.burst_minimum_above_pre_db,
+        candidate.peak_rms_dbfs - config.burst_maximum_below_peak_db,
+    )
+    frames: list[tuple[bool, float, float, float, float, float]] = []
+    taper = np.hanning(length)
+    for frame_center in range(center - radius, center + radius + 1, hop):
+        start = frame_center - length // 2
+        end = start + length
+        if start < 0 or end > len(values) or not np.all(covered[start:end]):
+            continue
+        frame = values[start:end] - np.mean(values[start:end])
+        level = float(20 * np.log10(max(float(np.sqrt(np.mean(frame**2))), 1e-8)))
+        power = np.abs(np.fft.rfft(frame * taper, n=fft_size)) ** 2
+        spectrum = power[shape_band]
+        mean_power = float(np.mean(spectrum))
+        if mean_power <= 1e-16:
+            continue
+        flatness = float(np.exp(np.mean(np.log(np.maximum(spectrum, mean_power * 1e-12)))) / mean_power)
+        fraction = float(np.sum(power[high_band]) / max(float(np.sum(power[broad_band])), 1e-16))
+        support = min(
+            flatness / config.burst_minimum_flatness,
+            fraction / config.burst_minimum_high_frequency_fraction,
+        )
+        passed = support >= 1.0 and level >= level_floor
+        # An above-floor frame ranks before quiet noise, even on rejection.
+        quality = support if level >= level_floor else -1.0
+        frames.append((passed, quality, flatness, fraction, level, window_start_s + frame_center / sample_rate))
+    if not frames:
+        return candidate
+    passed, _, flatness, fraction, level, evidence_time = max(frames, key=lambda item: (item[0], item[1], item[4]))
+    return replace(
+        candidate,
+        broadband_release_evidence=passed,
+        burst_evidence_time_s=evidence_time,
+        burst_spectral_flatness=flatness,
+        burst_high_frequency_fraction=fraction,
+        burst_rms_dbfs=level,
     )
 
 
@@ -591,24 +971,80 @@ def estimate_acoustic_release(
     phone_class: str = "p",
     coverage_mask: np.ndarray | None = None,
     config: AcousticReleaseConfig | None = None,
+    target_window_s: tuple[float, float] | None = None,
+    previous_window_s: tuple[float, float] | None = None,
+    next_window_s: tuple[float, float] | None = None,
+    target_occurrence_index: int = 0,
+    target_occurrence_anchors_s: Sequence[float] | None = None,
 ) -> AcousticReleaseEstimate:
-    """Select a measurable /p/ or /b/ release from ranked burst candidates."""
+    """Estimate an acoustic onset candidate for subsequent /p/ or /b/ review.
+
+    ``target_window_s`` is the ASR word span that contains the target kana;
+    ``previous_window_s``/``next_window_s`` are the neighbouring word spans.
+    With a target span, only target-attributed candidates can be selected, a
+    comparably strong non-target candidate hugging the span boundary rejects
+    the event as ``ambiguous_target_attribution``, and candidates that form
+    one continuous release event with the best target candidate (burst,
+    aspiration, voicing onset) are neither runner-ups nor rival hypotheses.
+
+    When one ASR word contains several bilabial kana, pass the rough anchors
+    of all of them in ``target_occurrence_anchors_s`` and this token's
+    position in ``target_occurrence_index``.  Distinct in-word release events
+    are then assigned to occurrences only when the nearest-anchor assignment
+    is one-to-one and in transcript order; otherwise nothing is measured, so a
+    single burst can never be reported for two occurrences.
+    """
 
     config = config or AcousticReleaseConfig()
     if config.acceptance_mode not in {"permissive", "conservative"}:
         raise ValueError("acceptance_mode must be 'permissive' or 'conservative'")
+    _validate_attribution_config(config)
     normalized_phone = phone_class.lower().strip("/ ")
     if normalized_phone not in {"p", "b"}:
         raise ValueError("phone_class must be 'p' or 'b'")
-    candidates = rank_acoustic_release_candidates(
+    target_window = _validate_window(target_window_s, "target_window_s")
+    _validate_window(previous_window_s, "previous_window_s")
+    _validate_window(next_window_s, "next_window_s")
+    occurrence_anchors = tuple(
+        float(value) for value in (target_occurrence_anchors_s or ())
+    )
+    if occurrence_anchors and not all(math.isfinite(value) for value in occurrence_anchors):
+        raise ValueError("target_occurrence_anchors_s must be finite")
+    if occurrence_anchors and list(occurrence_anchors) != sorted(occurrence_anchors):
+        raise ValueError("target_occurrence_anchors_s must be in transcript order")
+    occurrence_count = max(1, len(occurrence_anchors))
+    if not 0 <= int(target_occurrence_index) < occurrence_count:
+        raise ValueError("target_occurrence_index is outside target_occurrence_anchors_s")
+    occurrence_index = int(target_occurrence_index)
+
+    # Rank on the full list; ``maximum_candidates`` only limits what is
+    # returned for display, never what can create or remove ambiguity.
+    all_candidates = _rank_release_candidates_untruncated(
         waveform,
         sample_rate,
         window_start_s=window_start_s,
         anchor_time_s=anchor_time_s,
         coverage_mask=coverage_mask,
         config=config,
+        target_window_s=target_window,
+        previous_window_s=previous_window_s,
+        next_window_s=next_window_s,
     )
-    if not candidates:
+    values = np.asarray(waveform, dtype=np.float64).reshape(-1)
+    covered = np.isfinite(values)
+    if coverage_mask is not None:
+        covered &= np.asarray(coverage_mask, dtype=bool).reshape(-1)
+    all_candidates = tuple(
+        _with_broadband_release_evidence(
+            candidate, values, covered, sample_rate, window_start_s, config
+        )
+        for candidate in all_candidates
+    )
+
+    def unmeasurable(
+        reasons: tuple[str, ...],
+        candidates: tuple[AcousticReleaseCandidate, ...],
+    ) -> AcousticReleaseEstimate:
         return AcousticReleaseEstimate(
             anchor_time_s=float(anchor_time_s),
             phone_class=normalized_phone,
@@ -620,81 +1056,247 @@ def estimate_acoustic_release(
             confidence="insufficient",
             measurable=False,
             time_resolution_ms=config.hop_ms,
-            exclusion_reasons=("no_acoustic_release_candidate",),
+            exclusion_reasons=reasons,
             selected_candidate=None,
-            candidates=(),
+            candidates=candidates[: config.maximum_candidates],
+            target_window_s=target_window,
+            top_candidate_time_s=None,
+            target_occurrence_index=occurrence_index,
+            target_occurrence_count=occurrence_count,
         )
 
-    runner_up_margin = (
-        float(candidates[0].score - candidates[1].score)
-        if len(candidates) >= 2
-        else None
+    selectable = tuple(
+        candidate
+        for candidate in all_candidates
+        if candidate.attribution in _SELECTABLE_ATTRIBUTIONS
     )
-    if config.acceptance_mode == "conservative":
-        # Auto-accept only the unambiguous top-1 candidate. The complete ranked
-        # list remains available for audio-blinded manual review when it fails.
-        selected = candidates[0]
-        reasons: list[str] = []
-        if selected.local_coverage < config.minimum_coverage:
-            reasons.append("incomplete_audio_coverage")
-        if selected.energy_rise_db < config.conservative_minimum_energy_rise_db:
-            reasons.append("conservative_energy_rise_below_threshold")
+    if not selectable:
+        if not all_candidates:
+            reasons: tuple[str, ...] = ("no_acoustic_release_candidate",)
+        elif any(c.attribution == "shared_word_span" for c in all_candidates):
+            reasons = ("ambiguous_target_attribution",)
+        else:
+            reasons = ("no_acoustic_candidate_within_target_word",)
+        return unmeasurable(reasons, all_candidates)
+
+    # Generic energy peaks remain in the audit list, but may neither own a
+    # bilabial occurrence nor displace a weaker supported transient. Do this
+    # before clustering: a loud vowel must not absorb its earlier burst.
+    incomplete_coverage = any(
+        c.local_coverage < config.minimum_coverage
+        or c.burst_support_coverage != 1.0
+        for c in selectable
+    )
+    selectable = tuple(c for c in selectable if c.broadband_release_evidence)
+    if not selectable:
+        reasons = ("no_broadband_release_evidence",)
+        if incomplete_coverage:
+            reasons += ("incomplete_audio_coverage",)
+        return unmeasurable(reasons, all_candidates)
+
+    required_energy_rise = (
+        config.minimum_energy_rise_db_p
+        if normalized_phone == "p"
+        else config.minimum_energy_rise_db_b
+    )
+
+    def permissive_exclusions(
+        candidate: AcousticReleaseCandidate,
+    ) -> list[str]:
+        candidate_reasons: list[str] = []
+        if candidate.local_coverage < config.minimum_coverage:
+            candidate_reasons.append("incomplete_audio_coverage")
+        if candidate.spectral_flux_z < config.minimum_flux_z:
+            candidate_reasons.append("weak_spectral_burst")
         if (
-            selected.energy_slope_12ms_db
+            candidate.high_frequency_rise_db
+            < config.minimum_high_frequency_rise_db
+        ):
+            candidate_reasons.append("weak_high_frequency_release")
+        if candidate.energy_rise_db < required_energy_rise:
+            candidate_reasons.append("no_clear_post_release_energy_rise")
+        return candidate_reasons
+
+    def conservative_exclusions(
+        candidate: AcousticReleaseCandidate,
+    ) -> list[str]:
+        candidate_reasons: list[str] = []
+        if candidate.local_coverage < config.minimum_coverage:
+            candidate_reasons.append("incomplete_audio_coverage")
+        if candidate.energy_rise_db < config.conservative_minimum_energy_rise_db:
+            candidate_reasons.append("conservative_energy_rise_below_threshold")
+        if (
+            candidate.energy_slope_12ms_db
             < config.conservative_minimum_energy_slope_12ms_db
         ):
-            reasons.append("conservative_12ms_energy_slope_below_threshold")
+            candidate_reasons.append("conservative_12ms_energy_slope_below_threshold")
         if (
-            selected.high_frequency_rise_db
+            candidate.high_frequency_rise_db
             < config.conservative_minimum_high_frequency_rise_db
         ):
-            reasons.append("conservative_high_frequency_rise_below_threshold")
-        if selected.score < config.conservative_minimum_score:
-            reasons.append("conservative_score_below_threshold")
-        if (
-            runner_up_margin is not None
-            and runner_up_margin < config.conservative_minimum_runner_up_margin
-        ):
-            reasons.append("ambiguous_acoustic_top_candidate")
+            candidate_reasons.append("conservative_high_frequency_rise_below_threshold")
+        if candidate.score < config.conservative_minimum_score:
+            candidate_reasons.append("conservative_score_below_threshold")
         if not (
             config.conservative_minimum_offset_ms
-            <= selected.distance_from_anchor_ms
+            <= candidate.distance_from_anchor_ms
             <= config.conservative_maximum_offset_ms
         ):
-            reasons.append("acoustic_candidate_outside_conservative_anchor_gate")
+            candidate_reasons.append("acoustic_candidate_outside_conservative_anchor_gate")
+        return candidate_reasons
+
+    candidate_exclusions = (
+        conservative_exclusions
+        if config.acceptance_mode == "conservative"
+        else permissive_exclusions
+    )
+
+    # Burst, aspiration and voicing may produce several nearby score peaks.
+    # Grouping is an acoustic heuristic requiring both proximity and energy
+    # continuity; it does not establish a common phonetic cause.
+    envelope_t, envelope_db = _rms_envelope_db(
+        np.where(covered, values, 0.0),
+        sample_rate,
+        window_start_s=window_start_s,
+        frame_ms=config.frame_ms,
+        hop_ms=config.hop_ms,
+    )
+    same_event_s = config.same_event_window_ms / 1000.0
+
+    def same_event_pair(
+        leader: AcousticReleaseCandidate, other: AcousticReleaseCandidate
+    ) -> bool:
+        if leader.time_s == other.time_s:
+            return True
+        if abs(other.time_s - leader.time_s) > same_event_s:
+            return False
+        earlier, later = sorted((leader, other), key=lambda item: item.time_s)
+        return _continuous_release(
+            envelope_t,
+            envelope_db,
+            earlier,
+            later,
+            continuity_db=config.same_event_continuity_db,
+            skip_s=config.frame_ms / 1000.0,
+        )
+
+    # Events are formed greedily from the strongest target candidate down, so
+    # each event's leader is its highest-scoring member.
+    events: list[list[AcousticReleaseCandidate]] = []
+    for candidate in sorted(selectable, key=lambda item: item.score, reverse=True):
+        for event in events:
+            if same_event_pair(event[0], candidate):
+                event.append(candidate)
+                break
+        else:
+            events.append([candidate])
+    events_by_time = sorted(events, key=lambda event: event[0].time_s)
+
+    assigned_leaders: set[float] = set()
+    if occurrence_count > 1:
+        if len(events_by_time) < occurrence_count:
+            return unmeasurable(
+                ("fewer_target_releases_than_bilabial_occurrences",), all_candidates
+            )
+        assignment = [
+            min(
+                range(len(events_by_time)),
+                key=lambda index: abs(events_by_time[index][0].time_s - anchor),
+            )
+            for anchor in occurrence_anchors
+        ]
+        assigned_times = [events_by_time[index][0].time_s for index in assignment]
+        if (
+            len(set(assignment)) != occurrence_count
+            or assignment != sorted(assignment)
+            # At this separation the heuristic cannot confidently assign
+            # distinct occurrences. Preserve the uncertainty for review.
+            or any(
+                later - earlier <= same_event_s
+                for earlier, later in zip(assigned_times, assigned_times[1:])
+            )
+        ):
+            return unmeasurable(
+                ("unresolved_bilabial_occurrences_in_word",), all_candidates
+            )
+        my_event = events_by_time[assignment[occurrence_index]]
+        assigned_leaders = {
+            events_by_time[index][0].time_s
+            for position, index in enumerate(assignment)
+            if position != occurrence_index
+        }
     else:
-        required_energy_rise = (
-            config.minimum_energy_rise_db_p
-            if normalized_phone == "p"
-            else config.minimum_energy_rise_db_b
+        my_event = events[0]
+
+    if config.acceptance_mode == "conservative":
+        top = my_event[0]
+    else:
+        top = next(
+            (candidate for candidate in my_event if not permissive_exclusions(candidate)),
+            my_event[0],
         )
 
-        def permissive_exclusions(
-            candidate: AcousticReleaseCandidate,
-        ) -> list[str]:
-            candidate_reasons: list[str] = []
-            if candidate.local_coverage < config.minimum_coverage:
-                candidate_reasons.append("incomplete_audio_coverage")
-            if candidate.spectral_flux_z < config.minimum_flux_z:
-                candidate_reasons.append("weak_spectral_burst")
-            if (
-                candidate.high_frequency_rise_db
-                < config.minimum_high_frequency_rise_db
-            ):
-                candidate_reasons.append("weak_high_frequency_release")
-            if candidate.energy_rise_db < required_energy_rise:
-                candidate_reasons.append("no_clear_post_release_energy_rise")
-            return candidate_reasons
+    # A later continuation candidate may sit just inside the next word's
+    # rough span. Shared ownership or a previous-word label must still contest
+    # attribution; signal continuity cannot resolve a transcript overlap.
+    continuations = [
+        candidate
+        for candidate in all_candidates
+        if candidate.attribution in {"next_word", "outside_target_window"}
+        and 0.0 < candidate.time_s - top.time_s <= same_event_s
+        and same_event_pair(top, candidate)
+    ]
+    same_event_times = {candidate.time_s for candidate in (*my_event, *continuations)}
 
-        selected = next(
-            (
-                candidate
-                for candidate in candidates
-                if not permissive_exclusions(candidate)
-            ),
-            candidates[0],
-        )
-        reasons = permissive_exclusions(selected)
+    # Prefer an earlier member within the configured score margin only if it
+    # has at least the top candidate's spectral-flux support and passes the
+    # same onset gates. An energy rise with weaker spectral flux may be a
+    # low-frequency precursor. This relative guard does not identify a phone.
+    selected = min(
+        (
+            candidate
+            for candidate in my_event
+            if candidate.score >= top.score - config.conservative_minimum_runner_up_margin
+            and candidate.spectral_flux_z >= top.spectral_flux_z
+            and not candidate_exclusions(candidate)
+        ),
+        key=lambda candidate: candidate.time_s,
+        default=top,
+    )
+    competing = [
+        event[0].score
+        for event in events
+        if event[0].time_s not in same_event_times
+        and event[0].time_s not in assigned_leaders
+    ]
+    runner_up_margin = float(top.score - max(competing)) if competing else None
+
+    attribution_reasons: list[str] = []
+    if target_window is not None:
+        contested = [
+            candidate
+            for candidate in all_candidates
+            if candidate.attribution not in _SELECTABLE_ATTRIBUTIONS
+            and candidate.broadband_release_evidence
+            and candidate.time_s not in same_event_times
+            and candidate.distance_from_target_window_ms is not None
+            and candidate.distance_from_target_window_ms <= config.target_boundary_guard_ms
+            and candidate.score
+            >= top.score - config.conservative_minimum_runner_up_margin
+        ]
+        if contested:
+            attribution_reasons.append("ambiguous_target_attribution")
+
+    # Auto-accept only an unambiguous target candidate.  The ranked list
+    # remains available for audio-blinded manual review when it fails.
+    reasons = candidate_exclusions(selected)
+    if (
+        config.acceptance_mode == "conservative"
+        and runner_up_margin is not None
+        and runner_up_margin < config.conservative_minimum_runner_up_margin
+    ):
+        reasons.append("ambiguous_acoustic_top_candidate")
+    reasons.extend(attribution_reasons)
 
     measurable = not reasons
     if not measurable:
@@ -709,6 +1311,15 @@ def estimate_acoustic_release(
         confidence = "high"
     else:
         confidence = "medium"
+    candidates = tuple(
+        replace(candidate, same_event_as_selected=candidate.time_s in same_event_times)
+        for candidate in all_candidates
+    )
+    displayed_candidates = list(candidates[: config.maximum_candidates])
+    if all(candidate.time_s != selected.time_s for candidate in displayed_candidates):
+        # Retain the chosen onset in the review material even when an earlier
+        # candidate was selected over a louder peak and the display is capped.
+        displayed_candidates[-1] = replace(selected, same_event_as_selected=True)
     return AcousticReleaseEstimate(
         anchor_time_s=float(anchor_time_s),
         phone_class=normalized_phone,
@@ -720,9 +1331,13 @@ def estimate_acoustic_release(
         confidence=confidence,
         measurable=measurable,
         time_resolution_ms=config.hop_ms,
-        exclusion_reasons=tuple(reasons),
-        selected_candidate=selected,
-        candidates=candidates,
+        exclusion_reasons=tuple(dict.fromkeys(reasons)),
+        selected_candidate=replace(selected, same_event_as_selected=True),
+        candidates=tuple(displayed_candidates),
+        target_window_s=target_window,
+        top_candidate_time_s=top.time_s,
+        target_occurrence_index=occurrence_index,
+        target_occurrence_count=occurrence_count,
     )
 
 

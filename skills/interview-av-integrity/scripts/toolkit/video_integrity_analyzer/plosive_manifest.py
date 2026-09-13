@@ -42,6 +42,16 @@ class BilabialToken:
     exclusion_reason: str | None
     reading_text: str | None = None
     reading_source: str = "surface_word"
+    # Rough ASR spans of the neighbouring words (transcript order). The
+    # acoustic estimator uses them only to attribute burst candidates to the
+    # target word or a neighbour; they are never treated as release times.
+    previous_word_window_s: tuple[float, float] | None = None
+    next_word_window_s: tuple[float, float] | None = None
+    # Position of this kana among all bilabial kana of the same ASR word, and
+    # the rough proportional anchors of all of them, so one burst is never
+    # measured twice for one word.
+    word_occurrence_index: int = 0
+    word_occurrence_anchors_s: tuple[float, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -148,75 +158,117 @@ def extract_bilabial_tokens(
     data = _read_json(whisper_data)
     events: list[BilabialToken] = []
     serial = 0
-    for segment in data.get("segments", ()):
+    # Flatten words in transcript order so neighbour spans cross segment
+    # boundaries; a pause-separated neighbour still bounds attribution.
+    all_words: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = [
+        (segment, word)
+        for segment in data.get("segments", ())
+        for word in segment.get("words", ())
+    ]
+    for word_index, (segment, word) in enumerate(all_words):
         segment_id = segment.get("id")
         no_speech = segment.get("no_speech_prob")
         no_speech_value = float(no_speech) if no_speech is not None else None
-        for word in segment.get("words", ()):
-            text = unicodedata.normalize("NFKC", str(word.get("word", "")))
-            reading_source = next(
-                (
-                    key
-                    for key in ("reading", "kana", "pronunciation")
-                    if str(word.get(key, "")).strip()
-                ),
-                None,
+        previous_window = _word_window(
+            all_words[word_index - 1][1] if word_index > 0 else None
+        )
+        next_window = _word_window(
+            all_words[word_index + 1][1] if word_index + 1 < len(all_words) else None
+        )
+        text = unicodedata.normalize("NFKC", str(word.get("word", "")))
+        reading_source = next(
+            (
+                key
+                for key in ("reading", "kana", "pronunciation")
+                if str(word.get(key, "")).strip()
+            ),
+            None,
+        )
+        reading = unicodedata.normalize(
+            "NFKC",
+            str(word.get(reading_source, "")) if reading_source else text,
+        )
+        try:
+            start_s = float(word["start"])
+            end_s = float(word["end"])
+            probability = float(word.get("probability", 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        bilabial_positions = [
+            source_index
+            for source_index, kana in enumerate(reading)
+            if kana in _P_KANA or kana in _B_KANA
+        ]
+        occurrence_anchors = tuple(
+            _anchor_for_character(reading, source_index, start_s, end_s)
+            for source_index in bilabial_positions
+        )
+        for occurrence_index, source_index in enumerate(bilabial_positions):
+            kana = reading[source_index]
+            phoneme_class = "p" if kana in _P_KANA else "b"
+            serial += 1
+            anchor_s = occurrence_anchors[occurrence_index]
+            interval, interval_exclusion = _assign_interval(
+                anchor_s,
+                intervals,
+                boundary_guard_s=boundary_guard_s,
             )
-            reading = unicodedata.normalize(
-                "NFKC",
-                str(word.get(reading_source, "")) if reading_source else text,
+            reasons: list[str] = []
+            if anchor_s >= interview_end_s:
+                reasons.append("after_interview_cutoff")
+            if probability < minimum_asr_probability:
+                reasons.append("low_asr_probability")
+            if (
+                no_speech_value is not None
+                and no_speech_value > maximum_segment_no_speech_probability
+            ):
+                reasons.append("high_segment_no_speech_probability")
+            if interval_exclusion:
+                reasons.append(interval_exclusion)
+            events.append(
+                BilabialToken(
+                    event_id=f"pb-{serial:04d}",
+                    speaker=interval.speaker if interval else None,
+                    group=interval.group if interval else None,
+                    epoch_id=interval.epoch_id if interval else None,
+                    phoneme_class=phoneme_class,
+                    kana=kana,
+                    token_text=text,
+                    token_start_s=start_s,
+                    token_end_s=end_s,
+                    anchor_s=anchor_s,
+                    asr_probability=probability,
+                    segment_id=int(segment_id) if segment_id is not None else None,
+                    segment_no_speech_probability=no_speech_value,
+                    eligible=not reasons,
+                    exclusion_reason=";".join(reasons) if reasons else None,
+                    reading_text=reading,
+                    reading_source=reading_source or "surface_word",
+                    previous_word_window_s=previous_window,
+                    next_word_window_s=next_window,
+                    word_occurrence_index=occurrence_index,
+                    word_occurrence_anchors_s=occurrence_anchors,
+                )
             )
-            try:
-                start_s = float(word["start"])
-                end_s = float(word["end"])
-                probability = float(word.get("probability", 0.0))
-            except (KeyError, TypeError, ValueError):
-                continue
-            for source_index, kana in enumerate(reading):
-                if kana in _P_KANA:
-                    phoneme_class = "p"
-                elif kana in _B_KANA:
-                    phoneme_class = "b"
-                else:
-                    continue
-                serial += 1
-                anchor_s = _anchor_for_character(reading, source_index, start_s, end_s)
-                interval, interval_exclusion = _assign_interval(
-                    anchor_s,
-                    intervals,
-                    boundary_guard_s=boundary_guard_s,
-                )
-                reasons: list[str] = []
-                if anchor_s >= interview_end_s:
-                    reasons.append("after_interview_cutoff")
-                if probability < minimum_asr_probability:
-                    reasons.append("low_asr_probability")
-                if (
-                    no_speech_value is not None
-                    and no_speech_value > maximum_segment_no_speech_probability
-                ):
-                    reasons.append("high_segment_no_speech_probability")
-                if interval_exclusion:
-                    reasons.append(interval_exclusion)
-                events.append(
-                    BilabialToken(
-                        event_id=f"pb-{serial:04d}",
-                        speaker=interval.speaker if interval else None,
-                        group=interval.group if interval else None,
-                        epoch_id=interval.epoch_id if interval else None,
-                        phoneme_class=phoneme_class,
-                        kana=kana,
-                        token_text=text,
-                        token_start_s=start_s,
-                        token_end_s=end_s,
-                        anchor_s=anchor_s,
-                        asr_probability=probability,
-                        segment_id=int(segment_id) if segment_id is not None else None,
-                        segment_no_speech_probability=no_speech_value,
-                        eligible=not reasons,
-                        exclusion_reason=";".join(reasons) if reasons else None,
-                        reading_text=reading,
-                        reading_source=reading_source or "surface_word",
-                    )
-                )
     return events
+
+
+def _word_window(word: Mapping[str, Any] | None) -> tuple[float, float] | None:
+    """Return a usable ``(start_s, end_s)`` span for a neighbouring ASR word.
+
+    Zero-length, reversed, negative, or non-finite spans are returned as
+    ``None`` so they can neither confer nor block attribution.
+    """
+
+    if word is None:
+        return None
+    try:
+        start_s = float(word["start"])
+        end_s = float(word["end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(start_s) and math.isfinite(end_s)):
+        return None
+    if start_s < 0.0 or end_s <= start_s:
+        return None
+    return (start_s, end_s)

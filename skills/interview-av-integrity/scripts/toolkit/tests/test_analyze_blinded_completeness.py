@@ -210,6 +210,20 @@ class BlindedCompletenessTests(unittest.TestCase):
         self.assertEqual(audit["matched_annotation_count"], 3)
         self.assertEqual(audit["automated_without_annotation_count"], 1)
         self.assertEqual(audit["automated_without_annotation_ids"], ["b-missing"])
+        self.assertEqual(audit["legacy_unspecified_attribution_count"], 3)
+        csv_row = MODULE.event_csv_row(candidate)
+        self.assertEqual(csv_row["acoustic_attribution"], "legacy_unspecified")
+        self.assertEqual(csv_row["annotation_confidence"], "high")
+        self.assertIn("acoustic_realization", csv_row)
+
+    def test_stale_finalized_automated_hash_is_rejected_before_join(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            annotations, automated = root / "annotations.json", root / "automated.json"
+            annotations.write_text(json.dumps({"events": [], "metadata": {"input_sha256": {"automated_events": "stale"}}}))
+            automated.write_text(json.dumps(self.automated))
+            with self.assertRaisesRegex(ValueError, "SHA-256 does not match"):
+                MODULE.run(argparse.Namespace(annotations_json=annotations, automated_events_json=automated, output_dir=root / "output", overwrite=False))
 
     def test_missing_fixed_visual_release_is_counted(self) -> None:
         annotations = {
@@ -227,6 +241,30 @@ class BlindedCompletenessTests(unittest.TestCase):
         self.assertFalse(missing["measurable"])
         self.assertIn("missing_fixed_visual_release", missing["exclusion_reasons"])
         self.assertEqual(audit["audio_measurable_missing_visual_count"], 1)
+
+    def test_explicit_non_target_realization_is_retained_but_not_measured(self) -> None:
+        for label in ("other", "uncertain", "b"):
+            for nested in (False, True):
+                row = dict(self.annotations["events"][0])
+                if nested:
+                    row["annotation"] = {"acoustic_realization": label}
+                else:
+                    row["acoustic_realization"] = label
+                with self.subTest(label=label, nested=nested):
+                    records, audit = MODULE.join_blinded_annotations({"events": [row]}, self.automated, visual_config=self.visual_config)
+                    self.assertEqual(len(records), 4)
+                    self.assertFalse(records[0]["measurable"])
+                    self.assertIsNone(records[0]["mouth_shape_at_audio_release"])
+                    self.assertEqual(records[0]["annotation_status"], "unmeasurable")
+                    self.assertEqual(records[0]["source_annotation_status"], "measurable")
+                    self.assertIn("acoustic_realization_not_target", records[0]["exclusion_reasons"])
+                    self.assertEqual(audit["acoustic_attribution_excluded_ids"], ["p-candidate"])
+
+    def test_explicit_review_bounds_cannot_be_bypassed_by_direct_input(self) -> None:
+        row = {**self.annotations["events"][0], "review_window": {"start_s": 8.0, "end_s": 9.0}}
+        records, _ = MODULE.join_blinded_annotations({"events": [row]}, self.automated, visual_config=self.visual_config)
+        self.assertFalse(records[0]["measurable"])
+        self.assertIn("acoustic_release_outside_review_window", records[0]["exclusion_reasons"])
 
     def test_duplicate_unknown_and_class_mismatch_are_errors(self) -> None:
         duplicated = {"events": [self.annotations["events"][0]] * 2}

@@ -365,6 +365,8 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "phoneme_class": selection.get("phoneme_class"),
         "kana": selection.get("kana"),
         "token_text": selection.get("token_text"),
+        "reading_text": selection.get("reading_text"),
+        "reading_source": selection.get("reading_source"),
         "token_start_s": selection.get("token_start_s"),
         "token_end_s": selection.get("token_end_s"),
         "asr_anchor_s": selection.get("anchor_s"),
@@ -406,7 +408,19 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "acoustic_acceptance_mode": acoustic.get("acceptance_mode"),
         "acoustic_confidence": acoustic.get("confidence"),
         "acoustic_measurable": acoustic.get("measurable"),
+        "acoustic_phoneme_identity_status": acoustic.get("phoneme_identity_status"),
         "acoustic_exclusion_reasons": acoustic.get("exclusion_reasons"),
+        # Retain evidence for rejected peaks even when no marker is selected.
+        "acoustic_candidates": acoustic.get("candidates"),
+        "acoustic_broadband_release_evidence": acoustic_candidate.get(
+            "broadband_release_evidence"
+        ),
+        "acoustic_burst_spectral_flatness": acoustic_candidate.get(
+            "burst_spectral_flatness"
+        ),
+        "acoustic_burst_high_frequency_fraction": acoustic_candidate.get(
+            "burst_high_frequency_fraction"
+        ),
         "acoustic_spectral_flux_z": acoustic_candidate.get("spectral_flux_z"),
         "acoustic_high_frequency_rise_db": acoustic_candidate.get(
             "high_frequency_rise_db"
@@ -418,6 +432,11 @@ def event_csv_row(record: Mapping[str, object]) -> dict[str, object]:
         "acoustic_distance_from_anchor_ms": acoustic_candidate.get(
             "distance_from_anchor_ms"
         ),
+        "acoustic_candidate_attribution": acoustic_candidate.get("attribution"),
+        "acoustic_target_window_s": acoustic.get("target_window_s"),
+        "acoustic_top_candidate_time_s": acoustic.get("top_candidate_time_s"),
+        "acoustic_target_occurrence_index": acoustic.get("target_occurrence_index"),
+        "acoustic_target_occurrence_count": acoustic.get("target_occurrence_count"),
         "visual_contact_time_s": visual.get("contact_time_s"),
         "visual_candidate_time_s": visual.get("candidate_time_s"),
         "visual_release_time_s": visual.get("release_time_s"),
@@ -550,6 +569,8 @@ def _measure_token(
         end_s=end_s,
         sample_rate=AUDIO_SAMPLE_RATE,
     )
+    # The ASR word spans bound *attribution* only: a burst inside a
+    # neighbouring word's span is not reported as this token's release.
     acoustic = estimate_acoustic_release(
         audio.waveform,
         audio.sample_rate,
@@ -558,6 +579,11 @@ def _measure_token(
         phone_class=token.phoneme_class,
         coverage_mask=audio.coverage_mask,
         config=acoustic_config,
+        target_window_s=(token.token_start_s, token.token_end_s),
+        previous_window_s=token.previous_word_window_s,
+        next_window_s=token.next_word_window_s,
+        target_occurrence_index=token.word_occurrence_index,
+        target_occurrence_anchors_s=token.word_occurrence_anchors_s or None,
     )
 
     # The visual search receives the ASR anchor, not the acoustic estimate.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -143,7 +144,8 @@ class SkillHelperTests(unittest.TestCase):
                                     "kana": "プ",
                                     "token_text": "プロジェクト",
                                     "anchor_s": 5.0,
-                                }
+                                },
+                                "measurement": {"acoustic": {"candidates": [{"time_s": 5.01}]}},
                             }
                         ]
                     }
@@ -155,11 +157,13 @@ class SkillHelperTests(unittest.TestCase):
                 json.dumps(
                     {
                         "blinding": "speaker/group hidden",
+                        "source_events_sha256": hashlib.sha256(events.read_bytes()).hexdigest(),
                         "events": [
                             {
                                 "blind_id": "AR-0001",
                                 "runner_event_id": "novel-event",
                                 "anchor_s": 5.0,
+                                "review_window": {"start_s": 4.55, "end_s": 5.35, "covered_intervals": [{"start_s": 4.55, "end_s": 5.35}]},
                                 "candidates": [
                                     {"rank": 1, "time_s": 5.01, "relative_ms": 10.0}
                                 ],

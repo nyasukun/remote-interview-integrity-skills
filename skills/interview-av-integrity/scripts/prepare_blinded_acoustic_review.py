@@ -59,6 +59,29 @@ def save_wav(path: Path, waveform: np.ndarray, sample_rate: int) -> None:
         handle.writeframes(data.tobytes())
 
 
+def covered_audio_intervals(
+    waveform: np.ndarray, coverage_mask: np.ndarray, start_s: float, sample_rate: int
+) -> list[dict[str, float]]:
+    """Keep decoded finite sample runs; timeline padding is not observed audio."""
+    values = np.asarray(waveform).reshape(-1)
+    covered = np.asarray(coverage_mask, dtype=bool).reshape(-1)
+    if covered.size != values.size:
+        raise ValueError("coverage_mask must match waveform")
+    covered = covered & np.isfinite(values)
+    edges = np.diff(np.pad(covered.astype(np.int8), (1, 1)))
+    starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+    return [
+        {"start_s": start_s + int(start) / sample_rate, "end_s": start_s + int(end) / sample_rate}
+        for start, end in zip(starts, ends)
+    ]
+
+
+def time_is_covered(time_s: float, intervals: list[dict[str, float]]) -> bool:
+    # Stabilize half-open boundaries against floating-point anchor arithmetic.
+    time_s = round(time_s, 9)
+    return any(round(interval["start_s"], 9) <= time_s < round(interval["end_s"], 9) for interval in intervals)
+
+
 def spectrogram(values: np.ndarray, sample_rate: int) -> np.ndarray:
     values = np.nan_to_num(values, nan=0.0)
     frame = max(128, int(round(sample_rate * 0.008)))
@@ -97,6 +120,7 @@ def render_sheet(
     phone: str,
     kana: str,
     word: str,
+    covered_intervals: list[dict[str, float]] | None = None,
 ) -> Image.Image:
     width, height = 1400, 820
     left, right = 92, 1368
@@ -125,6 +149,21 @@ def render_sheet(
     duration = end_s - start_s
     def xpos(time_s: float) -> int:
         return int(round(left + (time_s - start_s) / duration * (right - left)))
+
+    if covered_intervals is not None:
+        cursor = start_s
+        gaps = []
+        for interval in covered_intervals:
+            if cursor < interval["start_s"]:
+                gaps.append((cursor, interval["start_s"]))
+            cursor = interval["end_s"]
+        if cursor < end_s:
+            gaps.append((cursor, end_s))
+        for gap_start, gap_end in gaps:
+            for top, bottom in ((wave_top, wave_bottom), (spec_top, spec_bottom)):
+                draw.rectangle((xpos(gap_start), top, xpos(gap_end), bottom), fill="#392a30")
+        if gaps:
+            draw.text((left, wave_bottom + 16), "Shaded intervals: no decoded audio; do not annotate a release there.", fill="#ffb4bc", font=font(18))
 
     anchor_x = xpos(anchor_s)
     draw.line((anchor_x, wave_top, anchor_x, spec_bottom), fill="#ffffff", width=2)
@@ -164,7 +203,7 @@ def main() -> int:
     output_dir = args.output_dir.expanduser().resolve()
     if not video.is_file() or not events_path.is_file():
         raise SystemExit("video and events JSON must exist")
-    if args.window_before <= 0 or args.window_after <= 0:
+    if not all(math.isfinite(value) and value > 0 for value in (args.window_before, args.window_after)):
         raise SystemExit("review windows must be positive")
 
     payload = json.loads(events_path.read_text(encoding="utf-8"))
@@ -179,10 +218,10 @@ def main() -> int:
         acoustic = nested(nested(event, "measurement"), "acoustic")
         candidates = acoustic.get("candidates")
         event_id = str(selection.get("event_id") or "")
-        if selection.get("eligible") is True and isinstance(candidates, list) and candidates:
+        if selection.get("eligible") is True and isinstance(candidates, list):
             reviewable.append(event)
         else:
-            skipped.append({"event_id": event_id, "reason": "not eligible or no acoustic candidates"})
+            skipped.append({"event_id": event_id, "reason": "not eligible or acoustic analysis unavailable"})
     if not reviewable:
         raise SystemExit("no reviewable acoustic events")
     reviewable.sort(key=lambda event: str(nested(event, "selection").get("event_id")))
@@ -211,19 +250,28 @@ def main() -> int:
         end_s = anchor + args.window_after
         try:
             audio = decode_audio_window(video, start_s=start_s, end_s=end_s, sample_rate=48_000)
-            candidates = [candidate for candidate in acoustic["candidates"] if isinstance(candidate, dict)]
+            covered_intervals = covered_audio_intervals(
+                audio.waveform, audio.coverage_mask, audio.start_s, audio.sample_rate
+            )
+            candidates = [
+                candidate for candidate in acoustic["candidates"]
+                if isinstance(candidate, dict)
+                and audio.start_s <= float(candidate["time_s"]) < audio.end_s
+                and time_is_covered(float(candidate["time_s"]), covered_intervals)
+            ]
             word = "" if args.hide_word else str(selection.get("token_text") or "")
             sheet = render_sheet(
                 blind_id,
                 audio.waveform,
                 audio.sample_rate,
-                start_s,
-                end_s,
+                audio.start_s,
+                audio.end_s,
                 anchor,
                 candidates,
                 str(selection.get("phoneme_class") or ""),
                 str(selection.get("kana") or ""),
                 word,
+                covered_intervals=covered_intervals,
             )
             sheet.save(output_dir / f"{blind_id}.png")
             save_wav(output_dir / f"{blind_id}.wav", audio.waveform, audio.sample_rate)
@@ -247,6 +295,11 @@ def main() -> int:
                 "blind_id": blind_id,
                 "runner_event_id": selection["event_id"],
                 "anchor_s": anchor,
+                "review_window": {
+                    "start_s": audio.start_s,
+                    "end_s": audio.end_s,
+                    "covered_intervals": covered_intervals,
+                },
                 "speaker": selection.get("speaker"),
                 "group": selection.get("group"),
                 "epoch_id": selection.get("epoch_id"),
@@ -277,7 +330,7 @@ def main() -> int:
     key_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 3,
                 "seed": args.seed,
                 "blinding": "video, speaker and candidate/control group absent from review sheets",
                 "source_events_sha256": sha256_file(events_path),

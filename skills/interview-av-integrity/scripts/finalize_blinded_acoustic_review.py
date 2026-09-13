@@ -36,6 +36,19 @@ def parse_optional_float(value: str) -> float | None:
     return result
 
 
+def parse_coverage_bound(value: object) -> float:
+    """Coverage provenance uses finite JSON numbers, never booleans or strings."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("coverage bound must be a number")
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ValueError("coverage bound must be finite") from error
+    if not math.isfinite(result):
+        raise ValueError("coverage bound must be finite")
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--events", type=Path, required=True)
@@ -62,12 +75,17 @@ def main() -> int:
         source_by_id[event_id] = event
 
     key = json.loads(key_path.read_text(encoding="utf-8"))
+    if key.get("source_events_sha256") != sha256_file(events_path):
+        raise SystemExit("blind key source_events_sha256 does not match events; regenerate review materials")
     key_rows = key.get("events")
     if not isinstance(key_rows, list) or not key_rows:
         raise SystemExit("blind key must contain a nonempty events list")
     key_by_blind = {str(row["blind_id"]): row for row in key_rows}
     if len(key_by_blind) != len(key_rows):
         raise SystemExit("duplicate blind_id in key")
+    runner_ids = [str(row.get("runner_event_id") or "") for row in key_rows]
+    if len(set(runner_ids)) != len(runner_ids):
+        raise SystemExit("duplicate runner_event_id in key")
 
     with annotations_path.open(encoding="utf-8", newline="") as handle:
         annotation_rows = list(csv.DictReader(handle))
@@ -100,11 +118,78 @@ def main() -> int:
         status_counts[status] += 1
 
         anchor = float(key_row["anchor_s"])
+        source_anchor = float(selection["anchor_s"])
+        if (
+            not (math.isfinite(anchor) and anchor >= 0 and math.isfinite(source_anchor))
+            or abs(anchor - source_anchor) > 1e-6
+        ):
+            raise SystemExit(f"{blind_id}: key anchor does not match source event")
+        review_window = key_row.get("review_window")
+        try:
+            start_s = parse_coverage_bound(review_window["start_s"])
+            end_s = parse_coverage_bound(review_window["end_s"])
+            if not (
+                math.isfinite(start_s) and math.isfinite(end_s)
+                and 0 <= start_s <= anchor < end_s
+            ):
+                raise ValueError("invalid bounds")
+        except (TypeError, KeyError, ValueError):
+            raise SystemExit(f"{blind_id}: missing or invalid review_window; regenerate review materials")
+        try:
+            coverage_rows = review_window["covered_intervals"]
+            if not isinstance(coverage_rows, list):
+                raise ValueError("covered_intervals must be a list")
+            covered_intervals = []
+            previous_end = start_s
+            for interval in coverage_rows:
+                interval_start = parse_coverage_bound(interval["start_s"])
+                interval_end = parse_coverage_bound(interval["end_s"])
+                if not (
+                    math.isfinite(interval_start) and math.isfinite(interval_end)
+                    and previous_end <= interval_start < interval_end <= end_s
+                ):
+                    raise ValueError("invalid or overlapping coverage interval")
+                covered_intervals.append({"start_s": interval_start, "end_s": interval_end})
+                previous_end = interval_end
+        except (TypeError, KeyError, ValueError):
+            raise SystemExit(f"{blind_id}: missing or invalid covered_intervals; regenerate review materials")
+
+        def is_covered(time_s: float) -> bool:
+            # E.g. .3 + (-100 / 1000) must stay at the excluded .2 endpoint.
+            time_s = round(time_s, 9)
+            return any(round(interval["start_s"], 9) <= time_s < round(interval["end_s"], 9) for interval in covered_intervals)
+
+        source_candidates = (
+            event.get("measurement", {}).get("acoustic", {}).get("candidates", [])
+        )
+        for position, candidate in enumerate(key_row.get("candidates", []), start=1):
+            if "rank" in candidate:
+                rank = candidate["rank"]
+                if isinstance(rank, bool) or not isinstance(rank, int) or rank != position:
+                    raise SystemExit(f"{blind_id}: candidate rank must be an integer matching its list position")
+            candidate_time = float(candidate["time_s"])
+            if not math.isfinite(candidate_time) or not start_s <= candidate_time < end_s:
+                raise SystemExit(f"{blind_id}: candidate outside review window")
+            if not is_covered(candidate_time):
+                raise SystemExit(f"{blind_id}: candidate outside decoded audio coverage")
+            if not any(
+                abs(candidate_time - float(source_candidate["time_s"])) <= 1e-6
+                for source_candidate in source_candidates
+            ):
+                raise SystemExit(f"{blind_id}: key candidate does not match source event")
+            if "relative_ms" in candidate and (
+                not math.isfinite(float(candidate["relative_ms"]))
+                or abs(float(candidate["relative_ms"]) - (candidate_time - anchor) * 1000.0) > 0.001
+            ):
+                raise SystemExit(f"{blind_id}: key candidate relative time does not match source time")
         rank_text = annotation.get("selected_candidate_rank", "").strip()
         relative = parse_optional_float(annotation.get("selected_release_relative_ms", ""))
         selected_rank = int(rank_text) if rank_text else None
         selected_time = None
         if status == "measurable":
+            intended_phone = str(selection.get("phoneme_class", "")).strip("/ ").lower()
+            if realization != intended_phone or realization not in {"p", "b"}:
+                raise SystemExit(f"{blind_id}: measurable annotation must identify the target p/b realization; use unmeasurable")
             if selected_rank is None and relative is None:
                 raise SystemExit(f"{blind_id}: measurable rows need candidate rank or relative time")
             if selected_rank is not None:
@@ -118,6 +203,10 @@ def main() -> int:
                 relative = (selected_time - anchor) * 1000.0
             else:
                 selected_time = anchor + float(relative) / 1000.0
+            if not math.isfinite(selected_time) or not start_s <= selected_time < end_s:
+                raise SystemExit(f"{blind_id}: selected release is outside review window")
+            if not is_covered(selected_time):
+                raise SystemExit(f"{blind_id}: selected release is outside decoded audio coverage")
         elif selected_rank is not None or relative is not None:
             raise SystemExit(f"{blind_id}: unmeasurable rows must not select a time")
 
@@ -139,12 +228,17 @@ def main() -> int:
                 "target_kana": selection.get("kana"),
                 "target_word": selection.get("token_text"),
                 "anchor_s": anchor,
+                "review_window": {
+                    "start_s": start_s,
+                    "end_s": end_s,
+                    "covered_intervals": covered_intervals,
+                },
                 "top3_candidates": key_row.get("candidates", []),
             }
         )
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 3,
         "analysis_role": "audio-only annotations fixed before visual join",
         "metadata": {
             "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
